@@ -39,5 +39,5 @@ if __name__ == "__main__":
     buffer.flush()
 
     # buffer now contains our fixed code to pass into SVF.
-    command = f"clang --only-llvm {buffer.name}"
+    command = f"clang -S --emit-llvm {buffer.name}"
     os.system(command)
