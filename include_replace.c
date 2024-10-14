@@ -37,4 +37,4 @@ nondet(ulonglong)
 nondet(unsigned)
 nondet(ushort)
 
-extern void svf_assert(bool);
+extern void svf_assert(int);
