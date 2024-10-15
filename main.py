@@ -10,12 +10,11 @@ import tempfile
 
 # Generic preprocessor fix.
 INCLUDE_REPLACE = "include_replace.c"
-# The function name for SVF's assert.
-SVF_ASSERT = "svf_assert"
 
 # Patterns for replacement.
-svc_assert = "__VERIFIER_assert("
-svc_assert_replace = f"{SVF_ASSERT}("
+# This prevents the #define from making a duplicate.
+svc_assert = "__VERIFIER_assert(int"
+svc_assert_replace = f"__SVC_assert(int"
 
 def replacement(text: str):
     # replace asserts with SVF's assert.
@@ -51,3 +50,7 @@ if __name__ == "__main__":
     subprocess.run(command)
 
     buffer.close()
+
+    # Run SVF on the resulting file.
+    # TODO: Get SVF built and ready to use.
+    #subprocess.run(["./bin/svf-ex", "working.ll"])

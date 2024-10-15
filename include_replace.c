@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Implement nondet values.
 typedef __int128_t int128;
 typedef __loff_t loff_t;
 typedef long long longlong;
@@ -37,4 +38,8 @@ nondet(ulonglong)
 nondet(unsigned)
 nondet(ushort)
 
-extern void svf_assert(int);
+// Convert SVC's asserts into SVF's asserts by a simple define to replace.
+// The original function definition is renamed in the Python code.
+#define __VERIFIER_assert svf_assert
+
+extern void svf_assert(bool);
