@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 # Wrapper around SVF to adapt to SVC
 # SVF: https://github.com/SVF-tools/SVF
 # SVC: https://sv-comp.sosy-lab.org/2025/
@@ -9,6 +10,8 @@ import sys
 import subprocess
 import tempfile
 import yaml
+
+VERSION = "1.0"
 
 # Generic preprocessor fix.
 INCLUDE_REPLACE = "include_replace.c"
@@ -57,6 +60,7 @@ def read_yaml(yaml_file: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("yaml_file", help="The input yaml file")
+    parser.add_argument("--version", action="version", version=f"{VERSION}")
 
     args = parser.parse_args()
 
