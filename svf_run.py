@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", action="version", version=f"{VERSION}")
     parser.add_argument("c_file", help="input C file")
-    parser.add_argument("--bits", choices=["32","64"], help="bit width")
+    parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", action="append", help="property files", default=[])
 
     args, extra = parser.parse_known_args()
