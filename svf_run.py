@@ -33,6 +33,7 @@ if __name__ == "__main__":
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", action="append", help="property files", default=[])
+    parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
     parser.add_argument("c_file", help="input C file")
 
     args, extra = parser.parse_known_args()
@@ -73,7 +74,11 @@ if __name__ == "__main__":
     # TODO: Get SVF running with other analysis options.
     svf_bin = get_real_path("svf/bin")
     extapi = get_real_path("svf/lib/extapi.bc")
-    command = [f"{svf_bin}/wpa", f"-extapi={extapi}", "-stat=false"]
+    command = [f"{svf_bin}/wpa", f"-extapi={extapi}"]
+
+    if not args.verbose:
+        # Disable long output.
+        command.append("-stat=false")
 
     # Specific analysis
     command.append("-ander")

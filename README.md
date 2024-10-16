@@ -23,6 +23,7 @@ options:
   --version       show program's version number and exit
   --bits {32,64}  bit width
   --prop PROP     property files
+  --verbose, -v   verbose output
 ```
 
 Notes:
