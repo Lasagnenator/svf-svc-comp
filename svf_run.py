@@ -10,7 +10,7 @@ import sys
 import subprocess
 import tempfile
 
-VERSION = "SVF-SVC 1.0 using SVF 3.0"
+VERSION = "1.0 using SVF 3.0"
 
 def get_real_path(relative):
     # Find the real path given a path relative to the current file
