@@ -10,11 +10,14 @@ import sys
 import subprocess
 import tempfile
 
-VERSION = "1.0"
+VERSION = "SVF-SVC 1.0 using SVF 3.0"
+
+def get_real_path(relative):
+    # Find the real path given a path relative to the current file
+    return os.path.join(os.path.dirname(__file__), relative)
 
 # Generic preprocessor fix.
-INCLUDE_REPLACE = os.path.join(os.path.dirname(__file__), "include_replace.c")
-#INCLUDE_REPLACE = "include_replace.c"
+INCLUDE_REPLACE = get_real_path("include_replace.c")
 
 # Patterns for replacement.
 # This prevents the #define from making a duplicate.
@@ -27,10 +30,10 @@ def replacement(text: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", action="version", version=f"{VERSION}")
-    parser.add_argument("c_file", help="input C file")
+    parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", action="append", help="property files", default=[])
+    parser.add_argument("c_file", help="input C file")
 
     args, extra = parser.parse_known_args()
     input_file = args.c_file
@@ -67,7 +70,14 @@ if __name__ == "__main__":
     buffer.close()
 
     # Run SVF on the resulting file.
-    # TODO: Get SVF built and ready to use.
-    #command = ["./bin/svf-ex", "working.ll"]
-    #print(f"Running SVF with command: {' '.join(command)}")
-    #subprocess.run(command)
+    # TODO: Get SVF running with other analysis options.
+    svf_bin = get_real_path("svf/bin")
+    extapi = get_real_path("svf/lib/extapi.bc")
+    command = [f"{svf_bin}/wpa", f"-extapi={extapi}", "-stat=false"]
+
+    # Specific analysis
+    command.append("-ander")
+
+    command.append("working.ll")
+    print(f"Running SVF with command: {' '.join(command)}")
+    subprocess.run(command)
