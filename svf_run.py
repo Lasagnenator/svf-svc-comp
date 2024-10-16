@@ -74,11 +74,14 @@ if __name__ == "__main__":
     # TODO: Get SVF running with other analysis options.
     svf_bin = get_real_path("svf/bin")
     extapi = get_real_path("svf/lib/extapi.bc")
-    command = [f"{svf_bin}/wpa", f"-extapi={extapi}"]
+    command = [f"{svf_bin}/ae", f"-extapi={extapi}"]
 
     if not args.verbose:
         # Disable long output.
         command.append("-stat=false")
+
+    # AE writes output.db for some reason so just send it to the void.
+    command.extend(["-output", "/dev/nul"])
 
     # Specific analysis
     command.append("-ander")
