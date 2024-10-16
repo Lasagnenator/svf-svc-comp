@@ -6,7 +6,7 @@ svc_assert_replace = f"__SVC_assert(int"
 svc_assert_preamble = """
 #define __VERIFIER_assert svf_assert
 extern void svf_assert(bool);
-"""[0]
+"""
 
 def assert_replace(text: str):
     # Replace asserts with fake assert function name.
