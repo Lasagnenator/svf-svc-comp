@@ -22,12 +22,12 @@ options:
   -h, --help      show this help message and exit
   --version       show program's version number and exit
   --bits {32,64}  bit width
-  --prop PROP     property files
+  --prop PROP     property file
   --verbose, -v   verbose output
 ```
 
 Notes:
 * `c_file` should be a C file that is valid for SV-Comp.
 * `--bits` defaults to `64` if none is specified.
-* `--prop` can be used multiple times for every property file.
+* `--prop` points to a file containing the desired property to be checked.
 * `--verbose` prints a lot of information about the internal graph.

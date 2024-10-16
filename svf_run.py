@@ -9,6 +9,7 @@ import re
 import sys
 import subprocess
 import tempfile
+import strategies
 
 VERSION = "1.0 using SVF 3.0"
 
@@ -19,20 +20,11 @@ def get_real_path(relative):
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")
 
-# Patterns for replacement.
-# This prevents the #define from making a duplicate.
-svc_assert = "__VERIFIER_assert(int"
-svc_assert_replace = f"__SVC_assert(int"
-
-def replacement(text: str):
-    # replace asserts with SVF's assert.
-    return text.replace(svc_assert, svc_assert_replace)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
-    parser.add_argument("--prop", action="append", help="property files", default=[])
+    parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
     parser.add_argument("c_file", help="input C file")
 
@@ -44,7 +36,7 @@ if __name__ == "__main__":
     # TODO: Find some way of making clang actually compile 32 bit
     # binaries on a 64 bit environment without errors.
     # Override bit width since it won't compile in 32 bit mode.
-    bits = 64
+    bits = "64"
 
     print(f"Running analysis: {input_file}.")
     print(f"Selected bit width: {bits}.")
@@ -56,8 +48,9 @@ if __name__ == "__main__":
         print(f"Using include_replace: {INCLUDE_REPLACE}.")
         buffer.write(f.read())
 
+    # TODO: Adapt the replacement based on the property given.
     with open(input_file, "r") as f:
-        buffer.write(replacement(f.read()))
+        buffer.write(strategies.assert_replace(f.read()))
 
     # buffer now contains our fixed code to pass into SVF.
     buffer.flush()
@@ -66,7 +59,7 @@ if __name__ == "__main__":
     command.append(buffer.name)
 
     print(f"Running clang with command: {' '.join(command)}")
-    subprocess.run(command)
+    subprocess.run(command).check_returncode()
 
     buffer.close()
 
@@ -88,4 +81,4 @@ if __name__ == "__main__":
 
     command.append("working.ll")
     print(f"Running SVF with command: {' '.join(command)}")
-    subprocess.run(command)
+    subprocess.run(command).check_returncode()

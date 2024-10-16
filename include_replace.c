@@ -38,8 +38,4 @@ nondet(ulonglong)
 nondet(unsigned)
 nondet(ushort)
 
-// Convert SVC's asserts into SVF's asserts by a simple define to replace.
-// The original function definition is renamed in the Python code.
-#define __VERIFIER_assert svf_assert
-
 extern void svf_assert(bool);
