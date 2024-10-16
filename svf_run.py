@@ -65,9 +65,9 @@ if __name__ == "__main__":
 
     # Run SVF on the resulting file.
     # TODO: Get SVF running with other analysis options.
-    svf_bin = get_real_path("svf/bin")
+    svf_bin = get_real_path("svf/bin/ae")
     extapi = get_real_path("svf/lib/extapi.bc")
-    command = [f"{svf_bin}/ae", f"-extapi={extapi}"]
+    command = [f"{svf_bin}", f"-extapi={extapi}"]
 
     if not args.verbose:
         # Disable long output.
