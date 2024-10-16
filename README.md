@@ -28,5 +28,6 @@ options:
 
 Notes:
 * `c_file` should be a C file that is valid for SV-Comp.
-* `--bits` option defaults to `64` if none is specified.
-* `--prop` option can be used multiple times for every property file.
+* `--bits` defaults to `64` if none is specified.
+* `--prop` can be used multiple times for every property file.
+* `--verbose` prints a lot of information about the internal graph.

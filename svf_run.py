@@ -80,7 +80,7 @@ if __name__ == "__main__":
         # Disable long output.
         command.append("-stat=false")
 
-    # AE writes output.db for some reason so just send it to the void.
+    # svf/bin/ae writes output.db for some reason so just send it to the void.
     command.extend(["-output", "/dev/nul"])
 
     # Specific analysis
