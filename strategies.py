@@ -16,13 +16,13 @@ def reach_inject(text: str):
     replaced = text.replace(svc_reach_code, svc_reach_replace)
     return svc_reach_preamble + replaced
 
-def apply_strategy(text: str, prop_file: str = "") -> (str, str):
+def apply_strategy(text: str, prop_file: str = "") -> (str, str, list):
     # Interpret the given property file and call the required function.
-    # Also returns the required tool to use.
+    # Also returns the required tool to use and additional args.
 
     if not prop_file:
         # DEBUG: default to reach safety.
-        return reach_inject(text), "ae"
+        return reach_inject(text), "ae", []
 
     with open(prop_file, "r") as f:
         prop_text = f.read()
@@ -32,24 +32,28 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str):
 
     if "LTL(G!call(reach_error()))" in prop_text:
         # Category 1: Reach Safety
-        return reach_inject(text), "ae"
+        return reach_inject(text), "ae", []
 
-    if any(x in prop_text for x in ["LTL(Gvalid-memcleanup)", "LTL(Gvalid-free)"]):
+    if any(x in prop_text for x in ["LTL(Gvalid-memcleanup)", "LTL(Gvalid-free)", "LTL(Gvalid-deref)", "LTL(Gvalid-memtrack)"]):
         # Category 2: Memory Safety
         # - valid free
         # - valid deref
         # - valid memtrack
         # - valid memcleanup
-        return "Not Implemented - Memory Safety", "saber"
+
+        # saber, -dfree, -leak
+        return "Not Implemented - Memory Safety", "saber", ["-dfree", "-leak"]
 
     if "LTL(G!overflow)" in prop_text:
         # Category 4: Overflow Detection
-        return "Not Implemented - Overflow Detection", "nul"
+        # This currently only does buffer overflow detection.
+        # ae, -overflow
+        return text, "ae", ["-overflow"]
 
     if "Non-existant" in prop_text:
         # Category 6: Software Systems
         # This category is just real use cases of the other three categories.
-        # This should never be hit.
+        # This if statement should never be hit.
         return "Not Implemented - Software Systems", "nul"
 
     return "UNKOWN PROPERTY", "nul"

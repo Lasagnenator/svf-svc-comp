@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     # TODO: Adapt the replacement based on the property given.
     with open(input_file, "r") as f:
-        replaced, exe = strategies.apply_strategy(f.read(), prop_file)
+        replaced, exe, svf_options = strategies.apply_strategy(f.read(), prop_file)
         buffer.write(replaced)
 
     # buffer now contains our fixed code to pass into SVF.
@@ -75,6 +75,7 @@ if __name__ == "__main__":
     svf_bin = get_real_path(f"svf/bin/{exe}")
     extapi = get_real_path("svf/lib/extapi.bc")
     command = [f"{svf_bin}", f"-extapi={extapi}"]
+    command.extend(svf_options)
 
     if not args.verbose:
         # Disable long output.
@@ -82,9 +83,6 @@ if __name__ == "__main__":
 
     # svf/bin/ae writes output.db for some reason so just send it to the void.
     command.extend(["-output", "/dev/nul"])
-
-    # Specific analysis
-    command.append("-ander")
 
     command.append("working.ll")
     print(f"Running SVF with command: {' '.join(command)}")
