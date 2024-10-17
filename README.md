@@ -7,6 +7,7 @@ Run `setup.sh` once to download the SVF binaries. `svf-svc-comp` uses [this](htt
 * `svf_run.py` does not use any libraries besides the standard Python ones.
 * `include_replace.c` needs to be in the same directory as `svf_run.py`.
 * After setup, the directory `svf` must be next to `svf_run.py`.
+* This project relies on `clang` being available to use.
 
 ## Running
 
