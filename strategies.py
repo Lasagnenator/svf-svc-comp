@@ -1,26 +1,27 @@
 
-# Convert SVC's assert usage into SVF's asserts by a simple #define.
-# The original function definition is renamed with Python.
-svc_assert = "__VERIFIER_assert(int"
-svc_assert_replace = f"__SVC_assert(int"
-svc_assert_preamble = """
-#define __VERIFIER_assert svf_assert
+# Inject SVF's reachability code into the SVC reach code.
+svc_reach_code = "void reach_error()"
+# Hide the original reach_error function.
+svc_reach_replace = "void svc_reach_error()"
+# TODO: change svf_reach into the actual reachability function.
+svc_reach_preamble = """
 extern void svf_assert(bool);
+void svf_reach() {svf_assert(false);}
+#define reach_error svf_reach
 """
 
-def assert_replace(text: str):
-    # Replace asserts with fake assert function name.
-    # This prevents the #define from making a duplicate.
-    replaced = text.replace(svc_assert, svc_assert_replace)
-    return svc_assert_preamble + replaced
+def reach_inject(text: str):
+    # Inject SVF's reachability into the reach_error function.
+    replaced = text.replace(svc_reach_code, svc_reach_replace)
+    return svc_reach_preamble + replaced
 
-def apply_strategy(text: str, prop_file: str) -> (str, str):
+def apply_strategy(text: str, prop_file: str = "") -> (str, str):
     # Interpret the given property file and call the required function.
     # Also returns the required tool to use.
 
     if not prop_file:
-        # DEBUG: default to reach safety.
-        return assert_replace(text), "ae"
+        # DEBUG: default to assert checking.
+        return reach_inject(text), "ae"
 
     with open(prop_file, "r") as f:
         prop_text = f.read()
@@ -30,7 +31,7 @@ def apply_strategy(text: str, prop_file: str) -> (str, str):
 
     if "LTL(G!call(reach_error()))" in prop_text:
         # Category 1: Reach Safety
-        return assert_replace(text), "ae"
+        return reach_inject(text), "ae"
 
     if any(x in prop_text for x in ["LTL(Gvalid-memcleanup)", "LTL(Gvalid-free)"]):
         # Category 2: Memory Safety

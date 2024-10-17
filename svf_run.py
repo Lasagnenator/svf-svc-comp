@@ -31,7 +31,7 @@ if __name__ == "__main__":
     args, extra = parser.parse_known_args()
     input_file = args.c_file
     bits = args.bits
-    properties = args.prop
+    prop_file = args.prop
 
     # TODO: Find some way of making clang actually compile 32 bit
     # binaries on a 64 bit environment without errors.
@@ -40,7 +40,7 @@ if __name__ == "__main__":
 
     print(f"Running analysis: {input_file}.")
     print(f"Selected bit width: {bits}.")
-    print(f"Properties: {properties}.")
+    print(f"Property file: {prop_file}.")
     print(f"Extra (unused) options: {extra}.")
 
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
@@ -50,7 +50,8 @@ if __name__ == "__main__":
 
     # TODO: Adapt the replacement based on the property given.
     with open(input_file, "r") as f:
-        buffer.write(strategies.assert_replace(f.read()))
+        replaced, exe = strategies.apply_strategy(f.read(), prop_file)
+        buffer.write(replaced)
 
     # buffer now contains our fixed code to pass into SVF.
     buffer.flush()
@@ -59,13 +60,19 @@ if __name__ == "__main__":
     command.append(buffer.name)
 
     print(f"Running clang with command: {' '.join(command)}")
-    subprocess.run(command).check_returncode()
+    retcode = subprocess.run(command).returncode
+    if retcode != 0:
+        print(f"Program exitted with code {retcode}.")
+
+    if args.verbose:
+        buffer.seek(0)
+        print(buffer.read())
 
     buffer.close()
 
     # Run SVF on the resulting file.
     # TODO: Get SVF running with other analysis options.
-    svf_bin = get_real_path("svf/bin/ae")
+    svf_bin = get_real_path(f"svf/bin/{exe}")
     extapi = get_real_path("svf/lib/extapi.bc")
     command = [f"{svf_bin}", f"-extapi={extapi}"]
 
@@ -81,4 +88,6 @@ if __name__ == "__main__":
 
     command.append("working.ll")
     print(f"Running SVF with command: {' '.join(command)}")
-    subprocess.run(command).check_returncode()
+    retcode = subprocess.run(command).returncode
+    if retcode != 0:
+        print(f"Program exitted with code {retcode}.")
