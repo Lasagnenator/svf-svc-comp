@@ -12,6 +12,7 @@ void svf_reach() {svf_assert(false);}
 
 def reach_inject(text: str):
     # Inject SVF's reachability into the reach_error function.
+    # This prevents the #define from making a duplicate.
     replaced = text.replace(svc_reach_code, svc_reach_replace)
     return svc_reach_preamble + replaced
 
@@ -20,7 +21,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str):
     # Also returns the required tool to use.
 
     if not prop_file:
-        # DEBUG: default to assert checking.
+        # DEBUG: default to reach safety.
         return reach_inject(text), "ae"
 
     with open(prop_file, "r") as f:
