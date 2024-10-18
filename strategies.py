@@ -32,11 +32,11 @@ def reach_inject(text: str):
 
 def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
     # Interpret the given property file and call the required function.
-    # Returns modified code file, SVF tool, extra options and category.
+    # Returns modified code, SVF tool, extra options and category.
 
     if not prop_file:
         # DEBUG: default to reach safety.
-        return reach_inject(text), "ae", ["-output", "/dev/nul"]
+        return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
     with open(prop_file, "r") as f:
         prop_text = f.read()

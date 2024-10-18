@@ -17,10 +17,6 @@ def get_real_path(relative):
     # Find the real path given a path relative to the current file
     return os.path.normpath(os.path.join(os.path.dirname(__file__), relative))
 
-def debug_print_file(file):
-    with open(file, "r") as f:
-        print(f.read())
-
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")
 
@@ -31,7 +27,7 @@ if __name__ == "__main__":
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
     parser.add_argument("--debug", "-d", action="store_true", help="debug output")
-    parser.add_argument("c_file", help="input C file")
+    parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
     input_file = args.c_file
@@ -43,19 +39,17 @@ if __name__ == "__main__":
     # Override bit width since it won't compile in 32 bit mode.
     bits = "64"
 
-    if args.debug:
+    if args.verbose:
         print(f"Running analysis: {input_file}.")
         print(f"Selected bit width: {bits}.")
         print(f"Property file: {prop_file}.")
         print(f"Extra (unused) options: {extra}.")
-
-    if args.debug:
         print(f"Using include_replace: {INCLUDE_REPLACE}.")
+
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(INCLUDE_REPLACE, "r") as f:
         buffer.write(f.read())
 
-    # TODO: Adapt the replacement based on the property given.
     with open(input_file, "r") as f:
         strategy = strategies.apply_strategy(f.read(), prop_file)
         replaced, exe, svf_options, category = strategy
@@ -67,16 +61,13 @@ if __name__ == "__main__":
     command = ["clang", "-S", "-emit-llvm", "-o", "working.ll", f"-m{bits}"]
     command.append(buffer.name)
 
-    if args.debug:
-        debug_print_file(buffer.name)
-
-    if args.debug:
+    if args.verbose:
         print(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
     if retcode != 0:
         print(f"Clang exitted with code {retcode}.")
 
-    if args.verbose:
+    if args.verbose or args.debug:
         buffer.seek(0)
         print(buffer.read())
 
@@ -89,13 +80,13 @@ if __name__ == "__main__":
     command = [f"{svf_bin}", f"-extapi={extapi}"]
     command.extend(svf_options)
 
-    if not args.verbose:
-        # Disable long output.
+    if not (args.verbose and args.debug):
+        # Disable long output from SVF.
         command.append("-stat=false")
 
     command.append("working.ll")
 
-    if args.debug:
+    if args.verbose:
         print(f"Running SVF with command: {' '.join(command)}")
 
     process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
