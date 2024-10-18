@@ -15,7 +15,11 @@ VERSION = "1.0 using SVF 3.0"
 
 def get_real_path(relative):
     # Find the real path given a path relative to the current file
-    return os.path.join(os.path.dirname(__file__), relative)
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), relative))
+
+def debug_print_file(file):
+    with open(file, "r") as f:
+        print(f.read())
 
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")
@@ -26,6 +30,7 @@ if __name__ == "__main__":
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
+    parser.add_argument("--debug", "-d", action="store_true", help="debug output")
     parser.add_argument("c_file", help="input C file")
 
     args, extra = parser.parse_known_args()
@@ -38,19 +43,22 @@ if __name__ == "__main__":
     # Override bit width since it won't compile in 32 bit mode.
     bits = "64"
 
-    print(f"Running analysis: {input_file}.")
-    print(f"Selected bit width: {bits}.")
-    print(f"Property file: {prop_file}.")
-    print(f"Extra (unused) options: {extra}.")
+    if args.debug:
+        print(f"Running analysis: {input_file}.")
+        print(f"Selected bit width: {bits}.")
+        print(f"Property file: {prop_file}.")
+        print(f"Extra (unused) options: {extra}.")
 
+    if args.debug:
+        print(f"Using include_replace: {INCLUDE_REPLACE}.")
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(INCLUDE_REPLACE, "r") as f:
-        print(f"Using include_replace: {INCLUDE_REPLACE}.")
         buffer.write(f.read())
 
     # TODO: Adapt the replacement based on the property given.
     with open(input_file, "r") as f:
-        replaced, exe, svf_options = strategies.apply_strategy(f.read(), prop_file)
+        strategy = strategies.apply_strategy(f.read(), prop_file)
+        replaced, exe, svf_options, category = strategy
         buffer.write(replaced)
 
     # buffer now contains our fixed code to pass into SVF.
@@ -59,10 +67,14 @@ if __name__ == "__main__":
     command = ["clang", "-S", "-emit-llvm", "-o", "working.ll", f"-m{bits}"]
     command.append(buffer.name)
 
-    print(f"Running clang with command: {' '.join(command)}")
+    if args.debug:
+        debug_print_file(buffer.name)
+
+    if args.debug:
+        print(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
     if retcode != 0:
-        print(f"Program exitted with code {retcode}.")
+        print(f"Clang exitted with code {retcode}.")
 
     if args.verbose:
         buffer.seek(0)
@@ -81,11 +93,13 @@ if __name__ == "__main__":
         # Disable long output.
         command.append("-stat=false")
 
-    # svf/bin/ae writes output.db for some reason so just send it to the void.
-    command.extend(["-output", "/dev/nul"])
-
     command.append("working.ll")
-    print(f"Running SVF with command: {' '.join(command)}")
-    retcode = subprocess.run(command).returncode
-    if retcode != 0:
-        print(f"Program exitted with code {retcode}.")
+
+    if args.debug:
+        print(f"Running SVF with command: {' '.join(command)}")
+
+    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if args.debug:
+        print(process.stdout)
+        print(process.stderr)
+    print(strategies.interpret_output(process, strategy))

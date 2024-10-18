@@ -14,7 +14,9 @@ Run `setup.sh` once to download the SVF binaries. `svf-svc-comp` uses [this](htt
 The main script is `svf_run.py`.
 
 ```
-usage: python3 svf_run.py [-h] [--version] [--bits {32,64}] [--prop PROP] c_file
+usage: svf_run.py [-h] [--version] [--bits {32,64}] [--prop PROP]
+                  [--verbose] [--debug]
+                  c_file
 
 positional arguments:
   c_file          input C file
@@ -25,6 +27,7 @@ options:
   --bits {32,64}  bit width
   --prop PROP     property file
   --verbose, -v   verbose output
+  --debug, -d     debug output
 ```
 
 Notes:
