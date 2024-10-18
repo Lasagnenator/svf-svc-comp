@@ -96,9 +96,8 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
         elif b"(0 found)" in SVF_stderr:
             return "Correct"
 
-    else:
-        # Unknown.
-        print(f"Category: {category}")
-        print(SVF_stdout)
-        print(SVF_stderr)
-        return "Unknown"
+    # Unknown.
+    print(f"Category: {category}")
+    print(SVF_stdout)
+    print(SVF_stderr)
+    return "Unknown"
