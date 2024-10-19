@@ -9,16 +9,10 @@ import re
 import sys
 import subprocess
 import tempfile
+
+from util import *
 import strategies
-
-VERSION = "1.0 using SVF 3.0"
-
-def get_real_path(relative):
-    # Find the real path given a path relative to the current file
-    return os.path.normpath(os.path.join(os.path.dirname(__file__), relative))
-
-# Generic preprocessor fix.
-INCLUDE_REPLACE = get_real_path("include_replace.c")
+import witness_output
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -75,6 +69,7 @@ if __name__ == "__main__":
 
     # Run SVF on the resulting file.
     # TODO: Get SVF running with other analysis options.
+    # TODO: Incorporate cpu time limits.
     svf_bin = get_real_path(f"svf/bin/{exe}")
     extapi = get_real_path("svf/lib/extapi.bc")
     command = [f"{svf_bin}", f"-extapi={extapi}"]
@@ -94,3 +89,4 @@ if __name__ == "__main__":
         print(process.stdout)
         print(process.stderr)
     print(strategies.interpret_output(process, strategy))
+    witness_output.generate_witness(process.stderr, args)
