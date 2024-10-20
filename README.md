@@ -1,6 +1,6 @@
-# svf-svc-comp
+# svf-svc
 
-Run `setup.sh` once to download the SVF binaries. `svf-svc-comp` uses [this](https://github.com/SVF-tools/SVF/releases/tag/SVF-3.0) specific release of SVF.
+Run `setup.sh` once to download the SVF binaries. `svf-svc` uses [this](https://github.com/SVF-tools/SVF/releases/tag/SVF-3.0) specific release of SVF.
 
 ## Requirements
 
