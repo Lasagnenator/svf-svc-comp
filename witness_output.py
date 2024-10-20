@@ -66,7 +66,6 @@ def generate_witness(svf_output, args):
 
     if args.debug:
         print(data)
-        return
 
     with open(WITNESS_FILE, "w") as f:
         yaml.dump([data], f)

@@ -14,7 +14,7 @@ from util import *
 import strategies
 import witness_output
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
@@ -90,3 +90,9 @@ if __name__ == "__main__":
         print(process.stderr)
     print(strategies.interpret_output(process, strategy))
     witness_output.generate_witness(process.stderr, args)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {e.args}")

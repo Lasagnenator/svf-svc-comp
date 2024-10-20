@@ -35,7 +35,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
     # Returns modified code, SVF tool, extra options and category.
 
     if not prop_file:
-        # DEBUG: default to reach safety.
+        print("DEBUG: no property file chosen, default to reachability.")
         return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
     with open(prop_file, "r") as f:
