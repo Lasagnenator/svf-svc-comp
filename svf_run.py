@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
     parser.add_argument("--debug", "-d", action="store_true", help="debug output")
+    parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
@@ -33,10 +34,11 @@ def main():
     # Override bit width since it won't compile in 32 bit mode.
     bits = "64"
 
-    if args.verbose:
+    if args.verbose or args.debug:
         print(f"Running analysis: {input_file}.")
         print(f"Selected bit width: {bits}.")
         print(f"Property file: {prop_file}.")
+        print(f"SVF time limit: {args.time_limit}.")
         print(f"Extra (unused) options: {extra}.")
         print(f"Using include_replace: {INCLUDE_REPLACE}.")
 
@@ -76,8 +78,11 @@ def main():
     command.extend(svf_options)
 
     if not (args.verbose and args.debug):
-        # Disable long output from SVF.
+        # Disable very long output from SVF.
         command.append("-stat=false")
+
+    if args.time_limit != -1:
+        command.extend(["-clock-type=cpu", f"-fs-time-limit={args.time_limit}"])
 
     command.append("working.ll")
 

@@ -19,15 +19,16 @@ usage: svf_run.py [-h] [--version] [--bits {32,64}] [--prop PROP]
                   c_file
 
 positional arguments:
-  c_file          input C file
+  c_file            input C file
 
 options:
-  -h, --help      show this help message and exit
-  --version       show program's version number and exit
-  --bits {32,64}  bit width
-  --prop PROP     property file
-  --verbose, -v   verbose output
-  --debug, -d     debug output
+  -h, --help        show this help message and exit
+  --version         show program's version number and exit
+  --bits {32,64}    bit width
+  --prop PROP       property file
+  --verbose, -v     verbose output
+  --debug, -d       debug output
+  --time-limit int  SVF time limit
 ```
 
 Notes:
