@@ -3,3 +3,4 @@ tests
 working.ll
 svf
 witness.yml
+witness.graphml

@@ -42,15 +42,12 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
     with open(prop_file, "r") as f:
         prop_text = f.read()
 
-    # Remove all spaces then check for what we are dealing with.
-    prop_text = prop_text.replace(" ", "")
-
-    if "LTL(G!call(reach_error()))" in prop_text:
+    if "LTL(G ! call(reach_error()))" in prop_text:
         # Category 1: Reach Safety
         util.log("apply_strategy: Category 1 - Reach Safety")
         return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
-    if any(x in prop_text for x in ["LTL(Gvalid-memcleanup)", "LTL(Gvalid-free)", "LTL(Gvalid-deref)", "LTL(Gvalid-memtrack)"]):
+    if any(x in prop_text for x in ["LTL(G valid-memcleanup)", "LTL(G valid-free)", "LTL(G valid-deref)", "LTL(G valid-memtrack)"]):
         # Category 2: Memory Safety
         # - valid free
         # - valid deref
@@ -59,7 +56,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         util.log("apply_strategy: Category 2 - Memory Safety")
         return text, "saber", ["-dfree", "-leak"], 2
 
-    if "LTL(G!overflow)" in prop_text:
+    if "LTL(G ! overflow)" in prop_text:
         # Category 4: Overflow Detection
         # This currently only does buffer overflow detection.
         util.log("apply_strategy: Category 4 - Overflow Detection")
@@ -106,5 +103,4 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
             return "Correct"
 
     # Unknown.
-    print(f"Category: {category}")
     return "Unknown"

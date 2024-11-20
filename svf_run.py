@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--witness", default="witness.yml", help="witness output")
+    parser.add_argument("--witness", default="witness.graphml", help="witness output")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
@@ -90,8 +90,9 @@ def main():
     log(f"Running SVF with command: {' '.join(command)}")
 
     process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print(strategies.interpret_output(process, strategy))
-    witness_output.generate_witness(process.stderr, args, witness_file)
+    result = strategies.interpret_output(process, strategy)
+    print(result)
+    witness_output.generate_witness(result, args, witness_file)
 
 if __name__ == "__main__":
     main()
