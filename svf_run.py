@@ -19,28 +19,32 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
-    parser.add_argument("--verbose", "-v", action="store_true", help="verbose output")
-    parser.add_argument("--debug", "-d", action="store_true", help="debug output")
+    parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
+    parser.add_argument("--witness", default="witness.yml", help="witness output")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
+    log(f"Arguments: {args}")
+    log(f"Extra unused arguments: {extra}")
+
     input_file = args.c_file
     bits = args.bits
     prop_file = args.prop
+    witness_file = args.witness
 
     # TODO: Find some way of making clang actually compile 32 bit
     # binaries on a 64 bit environment without errors.
     # Override bit width since it won't compile in 32 bit mode.
     bits = "64"
 
-    if args.verbose or args.debug:
-        print(f"Running analysis: {input_file}.")
-        print(f"Selected bit width: {bits}.")
-        print(f"Property file: {prop_file}.")
-        print(f"SVF time limit: {args.time_limit}.")
-        print(f"Extra (unused) options: {extra}.")
-        print(f"Using include_replace: {INCLUDE_REPLACE}.")
+    log(f"Running analysis: {input_file}.")
+    log(f"Selected bit width: {bits}.")
+    log(f"Property file: {prop_file}.")
+    log(f"SVF time limit: {args.time_limit}.")
+    log(f"Witness output file: {witness_file}.")
+    log(f"Extra (unused) options: {extra}.")
+    log(f"Using include_replace: {INCLUDE_REPLACE}.")
 
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(INCLUDE_REPLACE, "r") as f:
@@ -54,50 +58,40 @@ def main():
     # buffer now contains our fixed code to pass into SVF.
     buffer.flush()
 
-    command = ["clang", "-S", "-emit-llvm", "-o", "working.ll", f"-m{bits}"]
+    command = ["clang", "-S", "-emit-llvm", "-o", WORKING_FILE, f"-m{bits}"]
     command.append(buffer.name)
 
-    if args.verbose:
-        print(f"Running clang with command: {' '.join(command)}")
+    log(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
-    if retcode != 0:
-        print(f"Clang exitted with code {retcode}.")
+    log(f"Clang exitted with code {retcode}.")
 
-    if args.verbose or args.debug:
+    if args.verbose:
+        log("Generated file:")
         buffer.seek(0)
-        print(buffer.read())
+        log(buffer.read())
 
     buffer.close()
 
     # Run SVF on the resulting file.
-    # TODO: Get SVF running with other analysis options.
-    # TODO: Incorporate cpu time limits.
     svf_bin = get_real_path(f"svf/bin/{exe}")
     extapi = get_real_path("svf/lib/extapi.bc")
     command = [f"{svf_bin}", f"-extapi={extapi}"]
     command.extend(svf_options)
 
-    if not (args.verbose and args.debug):
+    if not args.verbose:
         # Disable very long output from SVF.
         command.append("-stat=false")
 
     if args.time_limit != -1:
         command.extend(["-clock-type=cpu", f"-fs-time-limit={args.time_limit}"])
 
-    command.append("working.ll")
+    command.append(WORKING_FILE)
 
-    if args.verbose:
-        print(f"Running SVF with command: {' '.join(command)}")
+    log(f"Running SVF with command: {' '.join(command)}")
 
     process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if args.debug:
-        print(process.stdout)
-        print(process.stderr)
     print(strategies.interpret_output(process, strategy))
-    witness_output.generate_witness(process.stderr, args)
+    witness_output.generate_witness(process.stderr, args, witness_file)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Error: {e.args}")
+    main()

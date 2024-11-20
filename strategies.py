@@ -1,4 +1,5 @@
 import subprocess
+import util
 
 # Hide the original reach_error function.
 svc_reach_code = "void reach_error("
@@ -35,7 +36,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
     # Returns modified code, SVF tool, extra options and category.
 
     if not prop_file:
-        print("DEBUG: no property file chosen, default to reachability.")
+        util.log("apply_strategy: no property file chosen, default to reachability.")
         return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
     with open(prop_file, "r") as f:
@@ -46,6 +47,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
 
     if "LTL(G!call(reach_error()))" in prop_text:
         # Category 1: Reach Safety
+        util.log("apply_strategy: Category 1 - Reach Safety")
         return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
     if any(x in prop_text for x in ["LTL(Gvalid-memcleanup)", "LTL(Gvalid-free)", "LTL(Gvalid-deref)", "LTL(Gvalid-memtrack)"]):
@@ -54,19 +56,23 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         # - valid deref
         # - valid memtrack
         # - valid memcleanup
+        util.log("apply_strategy: Category 2 - Memory Safety")
         return text, "saber", ["-dfree", "-leak"], 2
 
     if "LTL(G!overflow)" in prop_text:
         # Category 4: Overflow Detection
         # This currently only does buffer overflow detection.
+        util.log("apply_strategy: Category 4 - Overflow Detection")
         return text, "ae", ["-overflow", "-output", "/dev/nul"], 4
 
     if "Non-existant" in prop_text:
         # Category 6: Software Systems
         # This category is just real use cases of the other three categories.
         # This if statement should never be hit.
+        util.log("apply_strategy: Category 6 - Software Systems")
         return "Not Implemented - Software Systems", "nul", 6
 
+    util.log(f"apply_strategy: Unknown property {prop_text}")
     return "UNKOWN PROPERTY", "nul"
 
 def interpret_output(process: subprocess.CompletedProcess, strategy):
@@ -74,6 +80,9 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
 
     SVF_stdout = process.stdout
     SVF_stderr = process.stderr
+
+    util.log(f"SVF stdout:\n{SVF_stdout}")
+    util.log(f"SVF stderr:\n{SVF_stderr}")
 
     if category == 1:
         # AE with asserts to determine reachability.
@@ -98,6 +107,4 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
 
     # Unknown.
     print(f"Category: {category}")
-    print(SVF_stdout)
-    print(SVF_stderr)
     return "Unknown"

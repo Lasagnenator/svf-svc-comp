@@ -31,7 +31,7 @@ def generate_metadata(file, file_hash, spec, data_model):
         "task": task
     }
 
-def generate_witness(svf_output, args):
+def generate_witness(svf_output, args, output):
     file = os.path.basename(args.c_file)
     with open(args.c_file, "rb") as f:
         file_hash = hashlib.sha256(f.read()).hexdigest()
@@ -64,8 +64,8 @@ def generate_witness(svf_output, args):
         "loop_invariant": loop_invariant
     }
 
-    if args.debug:
-        print(data)
+    if args.verbose:
+        log(data)
 
-    with open(WITNESS_FILE, "w") as f:
+    with open(output, "w") as f:
         yaml.dump([data], f)

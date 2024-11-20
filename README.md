@@ -15,24 +15,25 @@ The main script is `svf_run.py`.
 
 ```
 usage: svf_run.py [-h] [--version] [--bits {32,64}] [--prop PROP]
-                  [--verbose] [--debug]
+                  [--verbose] [--time-limit TIME_LIMIT] [--witness WITNESS]
                   c_file
 
 positional arguments:
-  c_file            input C file
+  c_file                input C file in SV-Comp format
 
 options:
-  -h, --help        show this help message and exit
-  --version         show program's version number and exit
-  --bits {32,64}    bit width
-  --prop PROP       property file
-  --verbose, -v     verbose output
-  --debug, -d       debug output
-  --time-limit int  SVF time limit
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --bits {32,64}        bit width
+  --prop PROP           property file
+  --verbose, -v         display internals
+  --time-limit int      SVF time limit
+  --witness file        witness output
 ```
 
 Notes:
 * `c_file` should be a C file that is valid for SV-Comp.
 * `--bits` defaults to `64` if none is specified.
 * `--prop` points to a file containing the desired property to be checked.
-* `--verbose` prints a lot of information about the internal graph.
+* `--verbose` prints a lot of information about the internals.
+* `--witness` must be a writeable file path.
