@@ -1,13 +1,17 @@
-
 import hashlib
 import os
 import datetime
-from uuid import uuid4
 
 from util import *
 
 BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <key attr.name="isEntryNode" attr.type="boolean" for="node" id="entry">
+  <default>false</default>
+ </key>
+ <key attr.name="isViolationNode" attr.type="boolean" for="node" id="violation">
+  <default>false</default>
+ </key>
  <key attr.name="witness-type" attr.type="string" for="graph" id="witness-type"/>
  <key attr.name="sourcecodelang" attr.type="string" for="graph" id="sourcecodelang"/>
  <key attr.name="producer" attr.type="string" for="graph" id="producer"/>
@@ -25,15 +29,23 @@ BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
   <data key="programhash">{hash}</data>
   <data key="architecture">{bits}</data>
   <data key="creationtime">{creation_time}</data>
+  <node id="node0">
+   <data key="entry">true</data>
+   {violation}
+  </node>
  </graph>
 </graphml>
 """
 
+VIOLATION_KEY = '<data key="violation">true</data>'
+
 def generate_witness(result, args, output):
     if result == "Correct":
         witness_type = "correctness_witness"
+        violation = ""
     elif result == "Incorrect":
         witness_type = "violation_witness"
+        violation = VIOLATION_KEY
     else:
         # Unknown, do not produce a witness file.
         return
@@ -52,7 +64,8 @@ def generate_witness(result, args, output):
         "spec": spec,
         "version": VERSION,
         "bits": bits,
-        "creation_time": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
+        "creation_time": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
+        "violation": violation
     }
 
     log("Witness output data:")
