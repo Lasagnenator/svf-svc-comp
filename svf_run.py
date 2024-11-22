@@ -26,7 +26,7 @@ def main():
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
-    log(f"Extra unused arguments: {extra}")
+    log(f"Extra (unused) arguments: {extra}")
 
     input_file = args.c_file
     bits = args.bits
@@ -43,7 +43,6 @@ def main():
     log(f"Property file: {prop_file}.")
     log(f"SVF time limit: {args.time_limit}.")
     log(f"Witness output file: {witness_file}.")
-    log(f"Extra (unused) options: {extra}.")
     log(f"Using include_replace: {INCLUDE_REPLACE}.")
 
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
