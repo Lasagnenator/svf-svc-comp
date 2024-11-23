@@ -40,10 +40,10 @@ BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 VIOLATION_KEY = '<data key="violation">true</data>'
 
 def generate_witness(result, args, output):
-    if result == "Correct":
+    if "Correct" in result:
         witness_type = "correctness_witness"
         violation = ""
-    elif result == "Incorrect":
+    elif "Incorrect" in result:
         witness_type = "violation_witness"
         violation = VIOLATION_KEY
     else:

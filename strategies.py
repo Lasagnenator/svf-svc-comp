@@ -67,10 +67,10 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         # This category is just real use cases of the other three categories.
         # This if statement should never be hit.
         util.log("apply_strategy: Category 6 - Software Systems")
-        return "Not Implemented - Software Systems", "nul", 6
+        return text, "Not Implemented - Software Systems", ["nul"], 6
 
     util.log(f"apply_strategy: Unknown property {prop_text}")
-    return "UNKOWN PROPERTY", "nul", 0
+    return text, "UNKOWN PROPERTY", "nul", 0
 
 def interpret_output(process: subprocess.CompletedProcess, strategy):
     replaced, exe, svf_options, category = strategy
@@ -84,23 +84,23 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
     if category == 1:
         # AE with asserts to determine reachability.
         if b"svf_assert Fail." in SVF_stderr:
-            return "Incorrect"
+            return "REACH Incorrect"
         elif b"The assertion is successfully verified!!" in SVF_stderr:
-            return "Correct"
+            return "REACH Correct"
 
     elif category == 2:
         # SABER with memory checking.
         if b"NeverFree" in SVF_stderr:
-            return "Incorrect"
+            return "MEMORY Incorrect"
         elif SVF_stderr == b"":
-            return "Correct"
+            return "MEMORY Correct"
 
     elif category == 4:
         # AE with overflow detection
         if b"Buffer overflow" in SVF_stderr:
-            return "Incorrect"
+            return "OVERFLOW Incorrect"
         elif b"(0 found)" in SVF_stderr:
-            return "Correct"
+            return "OVERFLOW Correct"
 
     # Unknown.
     return "Unknown"
