@@ -31,21 +31,32 @@ def reach_inject(text: str):
     replaced = replaced.replace(svc_main, svc_main_replace)
     return svc_reach_preamble + replaced + svc_reach_post
 
+def reach_safety(text):
+    util.log("apply_strategy: Category 1 - Reach Safety")
+    return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
+
+def mem_safety(text):
+    util.log("apply_strategy: Category 2 - Memory Safety")
+    return text, "saber", ["-dfree", "-leak"], 2
+
+def overflow(text):
+    # This currently only does buffer overflow detection.
+    util.log("apply_strategy: Category 4 - Overflow Detection")
+    return text, "ae", ["-overflow", "-output", "/dev/nul"], 4
+
 def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
     # Interpret the given property file and call the required function.
     # Returns modified code, SVF tool, extra options and category.
 
     if not prop_file:
-        util.log("apply_strategy: no property file chosen, default to reachability.")
-        return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
+        return reach_safety(text)
 
     with open(prop_file, "r") as f:
         prop_text = f.read()
 
     if "LTL(G ! call(reach_error()))" in prop_text:
         # Category 1: Reach Safety
-        util.log("apply_strategy: Category 1 - Reach Safety")
-        return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
+        return reach_safety(text)
 
     if any(x in prop_text for x in ["LTL(G valid-memcleanup)", "LTL(G valid-free)", "LTL(G valid-deref)", "LTL(G valid-memtrack)"]):
         # Category 2: Memory Safety
@@ -53,21 +64,18 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         # - valid deref
         # - valid memtrack
         # - valid memcleanup
-        util.log("apply_strategy: Category 2 - Memory Safety")
-        return text, "saber", ["-dfree", "-leak"], 2
+        return mem_safety(text)
 
     if "LTL(G ! overflow)" in prop_text:
         # Category 4: Overflow Detection
-        # This currently only does buffer overflow detection.
-        util.log("apply_strategy: Category 4 - Overflow Detection")
-        return text, "ae", ["-overflow", "-output", "/dev/nul"], 4
+        return overflow(text)
 
     if "Non-existant" in prop_text:
         # Category 6: Software Systems
         # This category is just real use cases of the other three categories.
         # This if statement should never be hit.
         util.log("apply_strategy: Category 6 - Software Systems")
-        return "Not Implemented - Software Systems", "nul", 6
+        return text, "Not Implemented - Software Systems", ["nul"], 6
 
     util.log(f"apply_strategy: Unknown property {prop_text}")
     return "UNKOWN PROPERTY", "nul", 0
@@ -84,23 +92,23 @@ def interpret_output(process: subprocess.CompletedProcess, strategy):
     if category == 1:
         # AE with asserts to determine reachability.
         if b"svf_assert Fail." in SVF_stderr:
-            return "Incorrect"
+            return "REACH Incorrect"
         elif b"The assertion is successfully verified!!" in SVF_stderr:
-            return "Correct"
+            return "REACH Correct"
 
     elif category == 2:
         # SABER with memory checking.
         if b"NeverFree" in SVF_stderr:
-            return "Incorrect"
+            return "MEMORY Incorrect"
         elif SVF_stderr == b"":
-            return "Correct"
+            return "MEMORY Correct"
 
     elif category == 4:
         # AE with overflow detection
         if b"Buffer overflow" in SVF_stderr:
-            return "Incorrect"
+            return "OVERFLOW Incorrect"
         elif b"(0 found)" in SVF_stderr:
-            return "Correct"
+            return "OVERFLOW Correct"
 
     # Unknown.
     return "Unknown"
