@@ -11,6 +11,7 @@ def log(string, file=sys.stderr):
     # Print to stderr by default
     file.write(str(string))
     file.write("\n")
+    file.flush()
 
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")

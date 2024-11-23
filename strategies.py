@@ -1,8 +1,9 @@
+import re
 import subprocess
 import util
 
 # Hide the original reach_error function.
-svc_reach_code = "void reach_error("
+svc_reach_code = r"void reach_error *?\("
 svc_reach_replace = "void svc_reach_error("
 
 svc_reach_preamble = """
@@ -21,14 +22,14 @@ int main(void) {
 }
 """
 
-svc_main = "int main("
+svc_main = r"int main *?\("
 svc_main_replace = "int svf_main("
 
 def reach_inject(text: str):
     # Hide original reach_error
-    replaced = text.replace(svc_reach_code, svc_reach_replace)
+    replaced = re.sub(svc_reach_code, svc_reach_replace, text)
     # Replace the main function
-    replaced = replaced.replace(svc_main, svc_main_replace)
+    replaced = re.sub(svc_main, svc_main_replace, replaced)
     return svc_reach_preamble + replaced + svc_reach_post
 
 def reach_safety(text):
@@ -78,7 +79,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         return text, "Not Implemented - Software Systems", ["nul"], 6
 
     util.log(f"apply_strategy: Unknown property {prop_text}")
-    return "UNKOWN PROPERTY", "nul", 0
+    return "UNKOWN PROPERTY", ["nul"], 0
 
 def interpret_output(process: subprocess.CompletedProcess, strategy):
     replaced, exe, svf_options, category = strategy

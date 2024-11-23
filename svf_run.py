@@ -10,6 +10,7 @@ import sys
 import subprocess
 import tempfile
 
+import nondet
 from util import *
 import strategies
 import witness_output
@@ -43,14 +44,13 @@ def main():
     log(f"Property file: {prop_file}.")
     log(f"SVF time limit: {args.time_limit}.")
     log(f"Witness output file: {witness_file}.")
-    log(f"Using include_replace: {INCLUDE_REPLACE}.")
 
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
-    with open(INCLUDE_REPLACE, "r") as f:
-        buffer.write(f.read())
 
     with open(input_file, "r") as f:
-        strategy = strategies.apply_strategy(f.read(), prop_file)
+        c_code = f.read()
+        buffer.write(nondet.generate_nondet(c_code))
+        strategy = strategies.apply_strategy(c_code, prop_file)
         replaced, exe, svf_options, category = strategy
         buffer.write(replaced)
 
@@ -63,6 +63,10 @@ def main():
     log(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
     log(f"Clang exitted with code {retcode}.")
+    if not os.path.exists(WORKING_FILE):
+        log(f"Clang failed to output {WORKING_FILE}. SVF will fail.")
+        print("ERROR(CLANG)")
+        exit(retcode)
 
     if args.verbose:
         log("Generated file:")
