@@ -1,4 +1,3 @@
-#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -17,7 +16,8 @@ typedef unsigned short ushort;
 
 #define nondet(X) X __VERIFIER_nondet_##X() { X val; return val; }
 
-nondet(bool)
+// We can't include stdbool since some files define their own bool.
+_Bool __VERIFIER_nondet_bool() { _Bool val; return val; }
 nondet(char)
 nondet(int)
 nondet(int128)

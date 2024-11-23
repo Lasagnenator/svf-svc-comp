@@ -6,7 +6,7 @@ svc_reach_code = "void reach_error("
 svc_reach_replace = "void svc_reach_error("
 
 svc_reach_preamble = """
-extern void svf_assert(bool);
+extern void svf_assert(_Bool);
 int svf_svc_reach_test = 0;
 void reach_error() {svf_svc_reach_test = 1;}
 void svf_abort() {} // Do nothing.
