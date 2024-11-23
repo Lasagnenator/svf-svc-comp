@@ -13,6 +13,11 @@ def log(string, file=sys.stderr):
     file.write("\n")
     file.flush()
 
+def fail(error, code=1):
+    # error must be of the form ERROR(<word>)
+    print(error)
+    exit(code)
+
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")
 

@@ -65,8 +65,7 @@ def main():
     log(f"Clang exitted with code {retcode}.")
     if not os.path.exists(WORKING_FILE):
         log(f"Clang failed to output {WORKING_FILE}. SVF will fail.")
-        print("ERROR(CLANG)")
-        exit(retcode)
+        fail("ERROR(CLANG)", retcode)
 
     if args.verbose:
         log("Generated file:")

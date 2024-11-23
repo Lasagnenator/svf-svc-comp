@@ -79,7 +79,7 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
         return text, "Not Implemented - Software Systems", ["nul"], 6
 
     util.log(f"apply_strategy: Unknown property {prop_text}")
-    return "UNKOWN PROPERTY", ["nul"], 0
+    util.fail("ERROR(PROP)")
 
 def interpret_output(process: subprocess.CompletedProcess, strategy):
     replaced, exe, svf_options, category = strategy
