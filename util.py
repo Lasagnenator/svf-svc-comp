@@ -1,7 +1,7 @@
 import os
 import sys
 
-VERSION = "1.3 using SVF 3.0"
+VERSION = "1.5 using SVF 3.0"
 
 def get_real_path(relative):
     # Find the real path given a path relative to the current file
