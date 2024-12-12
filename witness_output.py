@@ -68,6 +68,11 @@ def generate_witness(result, args, output):
         "violation": violation
     }
 
+    if output == "":
+        log("No witness output requested.")
+        return
+
+    log(f"Witness output path: {output}")
     log("Witness output data:")
     log(data)
 
