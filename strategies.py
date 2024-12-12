@@ -26,6 +26,10 @@ svc_main = r"int main *?\("
 svc_main_replace = "int svf_main("
 
 def reach_inject(text: str):
+    # SVF cannot handle loops. If there's a "for" or "while", exit
+    if "for" in text or "while" in text:
+        util.fail("Unknown")
+
     # Hide original reach_error
     replaced = re.sub(svc_reach_code, svc_reach_replace, text)
     # Replace the main function
