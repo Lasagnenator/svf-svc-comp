@@ -11,8 +11,17 @@ The goal is to run SVF-SVC and gauge effectiveness changes.
 CSV file output.
 """
 
+import argparse
+import csv
+from collections import Counter
 from enum import Enum, auto
+import glob
+import subprocess
 import sys
+from typing import Tuple
+import os
+import yaml
+
 # Simple checks for output result.
 TRUE_PATTERN = b"Correct"
 FALSE_PATTERN = b"Incorrect"
@@ -31,15 +40,6 @@ class VERDICT(Enum):
     TRUE_INCORRECT = auto()
     FALSE_CORRECT = auto()
     FALSE_INCORRECT = auto()
-
-import argparse
-import csv
-from collections import Counter
-import glob
-import subprocess
-from typing import Tuple
-import os
-import yaml
 
 def interpret_output(stdout) -> VERDICT:
     if TRUE_PATTERN in stdout:
