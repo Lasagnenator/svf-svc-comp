@@ -18,6 +18,7 @@ from enum import Enum, auto
 import glob
 import subprocess
 import sys
+import time
 from typing import Tuple
 import os
 import yaml
@@ -51,24 +52,36 @@ def interpret_output(stdout) -> VERDICT:
     return VERDICT.ERROR
 
 def run_prop(prop_file, definition, args) -> VERDICT:
-    if isinstance(definition["input_files"], list) and len(definition["input_files"]) > 1:
+    if isinstance(definition["input_files"], (list, tuple)) and len(definition["input_files"]) > 1:
         # SVF can only handle one input file.
         return VERDICT.MULTIPLE_INPUTS
 
     c_file = definition["input_files"]
     svf_run = os.path.normpath(os.path.join(args.svf_root, "svf_run.py"))
-    command = [svf_run, c_file, "--prop", prop_file, "--witness", ""]
+    command = [svf_run, c_file,
+        "--prop", prop_file,
+        "--witness", "",
+        "--time-limit", "10"
+    ]
 
-    if args.verbose:
-        # This produces a LOT of output.
-        #command.append("-v")
+    if args.verbose > 2:
+        if args.verbose > 3:
+            # This produces a LOT of output.
+            command.append("-v")
         stderr = sys.stderr
     else:
         stderr = subprocess.PIPE
 
-    process = subprocess.run(command, cwd=".", stdout=subprocess.PIPE, stderr=stderr)
+    try:
+        process = subprocess.run(command, cwd=".",
+            stdout=subprocess.PIPE, stderr=stderr
+        )
 
-    return interpret_output(process.stdout)
+        return interpret_output(process.stdout)
+    except KeyboardInterrupt:
+        print(f"Skipped {c_file}, {prop_file}")
+        time.sleep(0.25)
+        return VERDICT.UNKNOWN
 
 def run_yaml(yaml_path: str, args) -> Tuple[dict[str, VERDICT], str]:
     """Returns results and total."""
@@ -86,7 +99,11 @@ def run_yaml(yaml_path: str, args) -> Tuple[dict[str, VERDICT], str]:
             or (args.cleanup and "valid-memcleanup.prp" in prop_file)
             or (args.overflow and "no-overflow.prp" in prop_file)
             ):
-            verdict = run_prop(prop_file, definition, args)
+            try:
+                verdict = run_prop(prop_file, definition, args)
+            except Exception as e:
+                print(f"Failed {yaml_path}, {prop_file}, {e}, {e.args}")
+                continue
         else:
             # Unsupported property
             continue
@@ -146,14 +163,16 @@ if __name__ == "__main__":
     parser.add_argument("--safety", action="store_true", help="Enable memory safety")
     parser.add_argument("--cleanup", action="store_true", help="Enable memory cleanup")
     parser.add_argument("--overflow", action="store_true", help="Enable overflow detection")
+
     parser.add_argument("--specific", help="use specific benchmark inside bench root", default=None)
+    parser.add_argument("--skip", action="append", default=[])
 
     parser.add_argument("--output", default=None, help="CSV output")
 
-    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--verbose", "-v", action="count", default=0)
 
     args, extra = parser.parse_known_args()
-    if args.verbose:
+    if args.verbose > 0:
         print(f"Arguments: {args}")
         print(f"Extra (unused) arguments: {extra}")
 
@@ -161,19 +180,43 @@ if __name__ == "__main__":
 
     original_cwd = os.path.abspath(".")
     os.chdir(args.bench_root)
-    for bench in glob.glob("c/**/*.yml", recursive=True):
+    for bench in sorted(glob.glob("c/**/*.yml", recursive=True)):
         if "witness" in bench:
             # Pretty broad hammer to ignore witness files.
             continue
         if args.specific is not None and args.specific not in bench:
             # Specific bench specified and doesn't match.
             continue
-        if args.verbose:
+
+        skip = False
+        for to_skip in args.skip:
+            if to_skip in bench:
+                skip = True
+        if skip:
+            continue
+
+        if args.verbose > 0:
             print(bench)
         os.chdir(args.bench_root)
         results.append(run_yaml(bench, args))
-        if args.verbose:
+        if args.verbose > 1:
             print(results[-1])
 
     os.chdir(original_cwd)
     compute_results(results, args)
+
+"""
+Example command
+
+python3 tester.py /mnt/sv-benchmarks /mnt/svf-svc-comp --reach --output out.csv -v \
+--skip xcsp --skip 06_fuzzle_50x50_0-cycle --skip rekcba_ctm --skip rekh_ctm
+
+Skip the following:
+ xcsp - SVF seems to spam the disk.
+ 06_fuzzle_50x50_0-cycle - SVF blows up memory.
+ rekcba_ctm - SVF hangs.
+ rekh_ctm - SVF hangs.
+
+Ctrl+C on any that you want to skip mid-test.
+Double Ctrl+C to quit (0.25s window).
+"""
