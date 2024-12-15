@@ -1,6 +1,9 @@
 import re
 import subprocess
 import util
+from typing import Tuple
+
+strategy_type = Tuple[str, str, list[str], int]
 
 # Hide the original reach_error function.
 svc_reach_code = r"void reach_error *?\("
@@ -25,7 +28,7 @@ int main(void) {
 svc_main = r"int main *?\("
 svc_main_replace = "int svf_main("
 
-def reach_inject(text: str):
+def reach_inject(text: str) -> str:
     # SVF cannot handle loops. If there's a "for" or "while", exit
     if "for" in text or "while" in text:
         util.fail("Unknown")
@@ -36,20 +39,20 @@ def reach_inject(text: str):
     replaced = re.sub(svc_main, svc_main_replace, replaced)
     return svc_reach_preamble + replaced + svc_reach_post
 
-def reach_safety(text):
+def reach_safety(text) -> strategy_type:
     util.log("apply_strategy: Category 1 - Reach Safety")
     return reach_inject(text), "ae", ["-output", "/dev/nul"], 1
 
-def mem_safety(text):
+def mem_safety(text) -> strategy_type:
     util.log("apply_strategy: Category 2 - Memory Safety")
     return text, "saber", ["-dfree", "-leak"], 2
 
-def overflow(text):
+def overflow(text) -> strategy_type:
     # This currently only does buffer overflow detection.
     util.log("apply_strategy: Category 4 - Overflow Detection")
     return text, "ae", ["-overflow", "-output", "/dev/nul"], 4
 
-def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
+def apply_strategy(text: str, prop_file: str = "") -> strategy_type:
     # Interpret the given property file and call the required function.
     # Returns modified code, SVF tool, extra options and category.
 
@@ -84,8 +87,9 @@ def apply_strategy(text: str, prop_file: str = "") -> (str, str, list, int):
 
     util.log(f"apply_strategy: Unknown property {prop_text}")
     util.fail("ERROR(PROP)")
+    return "", "", [""], 0
 
-def interpret_output(process: subprocess.CompletedProcess, strategy):
+def interpret_output(process: subprocess.CompletedProcess, strategy: strategy_type):
     replaced, exe, svf_options, category = strategy
 
     SVF_stdout = process.stdout
