@@ -20,6 +20,3 @@ def fail(error, code=1):
 
 # Generic preprocessor fix.
 INCLUDE_REPLACE = get_real_path("include_replace.c")
-
-# TODO: This assumes the path is writeable.
-WORKING_FILE = "/tmp/working.ll"

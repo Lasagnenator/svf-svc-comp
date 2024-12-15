@@ -57,20 +57,23 @@ def main():
     # buffer now contains our fixed code to pass into SVF.
     buffer.flush()
 
-    command = ["clang", "-S", "-emit-llvm", "-o", WORKING_FILE, f"-m{bits}"]
+    if args.verbose:
+        log("Generated file:")
+        buffer.seek(0)
+        log(buffer.read())
+
+    working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
+
+    command = ["clang", "-S", "-emit-llvm", "-o", working_file.name, f"-m{bits}"]
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
     log(f"Clang exitted with code {retcode}.")
-    if not os.path.exists(WORKING_FILE):
-        log(f"Clang failed to output {WORKING_FILE}. SVF will fail.")
-        fail("ERROR(CLANG)", retcode)
 
-    if args.verbose:
-        log("Generated file:")
-        buffer.seek(0)
-        log(buffer.read())
+    if retcode != 0:
+        log(f"Clang failed to output {working_file.name}. SVF will fail.")
+        fail("ERROR(CLANG)", retcode)
 
     buffer.close()
 
@@ -87,7 +90,7 @@ def main():
     if args.time_limit != -1:
         command.extend(["-clock-type=cpu", f"-fs-time-limit={args.time_limit}"])
 
-    command.append(WORKING_FILE)
+    command.append(working_file.name)
 
     log(f"Running SVF with command: {' '.join(command)}")
 
@@ -95,6 +98,7 @@ def main():
     result = strategies.interpret_output(process, strategy)
     print(result)
     witness_output.generate_witness(result, args, witness_file)
+    working_file.close()
 
 if __name__ == "__main__":
     main()
