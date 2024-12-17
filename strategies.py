@@ -78,16 +78,9 @@ def apply_strategy(text: str, prop_file: str = "") -> strategy_type:
         # Category 4: Overflow Detection
         return overflow(text)
 
-    if "Non-existant" in prop_text:
-        # Category 6: Software Systems
-        # This category is just real use cases of the other three categories.
-        # This if statement should never be hit.
-        util.log("apply_strategy: Category 6 - Software Systems")
-        return text, "Not Implemented - Software Systems", ["nul"], 6
-
+    # Catch all.
     util.log(f"apply_strategy: Unknown property {prop_text}")
-    util.fail("ERROR(PROP)")
-    return "", "", [""], 0
+    util.fail("Unknown", 0)
 
 def interpret_output(process: subprocess.CompletedProcess, strategy: strategy_type):
     replaced, exe, svf_options, category = strategy

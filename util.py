@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import NoReturn
 
 VERSION = "1.5 using SVF 3.0"
 
@@ -13,7 +14,7 @@ def log(string, file=sys.stderr):
     file.write("\n")
     file.flush()
 
-def fail(error, code=1):
+def fail(error, code=1) -> NoReturn:
     # error must be of the form ERROR(<word>)
     print(error)
     exit(code)
