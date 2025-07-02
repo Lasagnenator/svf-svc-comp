@@ -1,0 +1,26 @@
+- entry_type: invariant_set
+  metadata:
+    format_version: 2.0
+    uuid: c456f822-68c3-4e9d-81cd-1ac8e0584bb8
+    creation_time: '2025-07-02T17:39:40.780742'
+    producer:
+      name: svf-svc
+      version: 2.0
+    task:
+      input_file:
+      - multivar_1-1.c
+      input_file_hashes:
+        multivar_1-1.c: b3aae87953f96aa404e5e15573a1dcacf4cae28eb9871ce3f841ded6190a7177
+      specification: CHECK( init(main()), LTL(G ! call(reach_error())) )
+      data_model: ILP32
+      language: C
+  content:
+  - invariant:
+      type: loop_invariant
+      location:
+        file_name: multivar_1-1.c
+        line: 22
+        column: 0
+        function: main
+      value: ( y == x )
+      format: c_expression
