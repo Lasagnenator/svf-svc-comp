@@ -7,7 +7,7 @@
 
 ### Install PySvf and other dependencies
 ```
-python3 -m pip install -i https://test.pypi.org/simple/ pysvf
+python3 -m pip install -i https://test.pypi.org/simple/ -U pysvf
 python3 -m pip install pyyaml
 ```
 
