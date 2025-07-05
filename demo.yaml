@@ -13,3 +13,7 @@ externs:
   column: 20
   function: __VERIFIER_nondet_uint
   type: nondet_uint
+- line: 22
+  column: 3
+  function: __VERIFIER_assert
+  type: assert
