@@ -205,47 +205,48 @@ with open('demo.prp', 'r') as file:
         'property': property
     }
 
+# Add any new features to be extracted in here.
+externs = {
+    'main':                      'source',
+    '__assert_fail':             'tainted_sink',
+    'abort':                     'tainted_sink',
+    'stdin':                     'tainted_source',
+    'stdout':                    'tainted_sink',
+    'stderr':                    'tainted_sink',
+    '__VERIFIER_assert':         'assert',
+    '__VERIFIER_error':          'tainted_sink',
+    '__VERIFIER_atomic_begin':   'atomic_begin',
+    '__VERIFIER_atomic_end':     'atomic_end',
+    '__VERIFIER_nondet_int':     'nondet_int',
+    '__VERIFIER_nondet_uint':    'nondet_uint',
+    '__VERIFIER_nondet_long':    'nondet_long',
+    '__VERIFIER_nondet_ulong':   'nondet_ulong',
+    '__VERIFIER_nondet_double':  'nondet_double',
+    '__VERIFIER_nondet_bool':    'nondet_bool',
+    '__VERIFIER_nondet_char':    'nondet_char',
+    '__VERIFIER_nondet_charp':   'nondet_charp',
+    '__VERIFIER_nondet_pchar':   'nondet_pchar',
+    '__VERIFIER_nondet_float':   'nondet_float',
+    '__VERIFIER_nondet_loff_t':  'nondet_loff_t',
+    '__VERIFIER_nondet_longlong':'nondet_longlong',
+    '__VERIFIER_nondet_msg_t':   'nondet_msg_t',
+    '__VERIFIER_nondet_sector_t':'nondet_sector_t',
+    '__VERIFIER_nondet_short':   'nondet_short',
+    '__VERIFIER_nondet_size_t':  'nondet_size_t',
+    '__VERIFIER_nondet_u16':     'nondet_u16',
+    '__VERIFIER_nondet_u32':     'nondet_u32',
+    '__VERIFIER_nondet_u8':      'nondet_u8',
+    '__VERIFIER_nondet_uint128': 'nondet_uint128',
+    '__VERIFIER_nondet_uchar':   'nondet_uchar',
+    '__VERIFIER_nondet_unsigned':'nondet_unsigned',
+    '__VERIFIER_nondet_ulonglong':'nondet_ulonglong',
+    '__VERIFIER_base_pointer':   'base_pointer',
+}
+
 yaml_dict['externs'] = []
 for node in icfg.getNodes():
     if isinstance(node, CallICFGNode):
         # main, __assert_fail, abort, __VERIFIER_nondet_uint
-        externs = {
-            'main':                      'source',
-            '__assert_fail':             'tainted_sink',
-            'abort':                     'tainted_sink',
-            'stdin':                     'tainted_source',
-            'stdout':                    'tainted_sink',
-            'stderr':                    'tainted_sink',
-            '__VERIFIER_assert':         'assert',
-            '__VERIFIER_error':          'tainted_sink',
-            '__VERIFIER_atomic_begin':   'atomic_begin',
-            '__VERIFIER_atomic_end':     'atomic_end',
-            '__VERIFIER_nondet_int':     'nondet_int',
-            '__VERIFIER_nondet_uint':    'nondet_uint',
-            '__VERIFIER_nondet_long':    'nondet_long',
-            '__VERIFIER_nondet_ulong':   'nondet_ulong',
-            '__VERIFIER_nondet_double':  'nondet_double',
-            '__VERIFIER_nondet_bool':    'nondet_bool',
-            '__VERIFIER_nondet_char':    'nondet_char',
-            '__VERIFIER_nondet_charp':   'nondet_charp',
-            '__VERIFIER_nondet_pchar':   'nondet_pchar',
-            '__VERIFIER_nondet_float':   'nondet_float',
-            '__VERIFIER_nondet_loff_t':  'nondet_loff_t',
-            '__VERIFIER_nondet_longlong':'nondet_longlong',
-            '__VERIFIER_nondet_msg_t':   'nondet_msg_t',
-            '__VERIFIER_nondet_sector_t':'nondet_sector_t',
-            '__VERIFIER_nondet_short':   'nondet_short',
-            '__VERIFIER_nondet_size_t':  'nondet_size_t',
-            '__VERIFIER_nondet_u16':     'nondet_u16',
-            '__VERIFIER_nondet_u32':     'nondet_u32',
-            '__VERIFIER_nondet_u8':      'nondet_u8',
-            '__VERIFIER_nondet_uint128': 'nondet_uint128',
-            '__VERIFIER_nondet_uchar':   'nondet_uchar',
-            '__VERIFIER_nondet_unsigned':'nondet_unsigned',
-            '__VERIFIER_nondet_ulonglong':'nondet_ulonglong',
-            '__VERIFIER_base_pointer':   'base_pointer',
-        }
-        
         source_loc = SourceLocation(node.getSourceLoc())
         if node.getCalledFunction().getName() in externs:
             yaml_dict['externs'].append({
