@@ -1,15 +1,15 @@
 categories:
   property: CHECK( init(main()), LTL(G ! call(reach_error())) )
 externs:
-- column: 22
-  line: 3
-  name: __assert_fail
+- line: 3
+  column: 22
+  function: __assert_fail
   type: tainted_sink
-- column: 27
-  line: 8
-  name: abort
+- line: 8
+  column: 27
+  function: abort
   type: tainted_sink
-- column: 20
-  line: 14
-  name: __VERIFIER_nondet_uint
+- line: 14
+  column: 20
+  function: __VERIFIER_nondet_uint
   type: nondet_uint

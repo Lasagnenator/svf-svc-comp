@@ -217,41 +217,41 @@ for node in icfg.getNodes():
         source_loc = SourceLocation(node.getSourceLoc())
         if node.getCalledFunction().getName() == "__assert_fail":
             yaml_dict['externs'].append({
-                'name': node.getCalledFunction().getName(),
-                'line': source_loc.getLnNo(), # TODO: get line number
-                'column': source_loc.getColNo(), # TODO: get column number
+                'line': source_loc.getLnNo(),
+                'column': source_loc.getColNo(),
+                'function': node.getCalledFunction().getName(),
                 'type': 'tainted_sink'
             })
 
             pass
         elif node.getCalledFunction().getName() == "abort":
             yaml_dict['externs'].append({
-                'name': node.getCalledFunction().getName(),
-                'line': source_loc.getLnNo(), # TODO: get line number
-                'column': source_loc.getColNo(), # TODO: get column number
+                'line': source_loc.getLnNo(),
+                'column': source_loc.getColNo(),
+                'function': node.getCalledFunction().getName(),
                 'type': 'tainted_sink'
             })
 
             pass
         elif node.getCalledFunction().getName() == "__VERIFIER_nondet_uint":
-            yaml_dict['externs'].append({
-                'name': node.getCalledFunction().getName(),
-                'line': source_loc.getLnNo(), # TODO: get line number
-                'column': source_loc.getColNo(), # TODO: get column number
+            yaml_dict['externs'].append({                
+                'line': source_loc.getLnNo(),
+                'column': source_loc.getColNo(),
+                'function': node.getCalledFunction().getName(),
                 'type': 'nondet_uint'
             })
             pass
         elif node.getCalledFunction().getName() == "main":
-            yaml_dict['externs'].append({
-                'name': node.getCalledFunction().getName(),
-                'line': source_loc.getLnNo(), # TODO: get line number
-                'column': source_loc.getColNo(), # TODO: get column number
+            yaml_dict['externs'].append({                
+                'line': source_loc.getLnNo(),
+                'column': source_loc.getColNo(),
+                'function': node.getCalledFunction().getName(),
                 'type': 'source'
             })
             pass
 
 with open('demo.yaml', 'w') as file:
-    yaml.dump(yaml_dict, file)
+    yaml.dump(yaml_dict, file, sort_keys=False)
 
 
 
