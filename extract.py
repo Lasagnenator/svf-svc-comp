@@ -176,24 +176,20 @@ icfg = pag.getICFG()
 '''
 target yaml
 categories:
-  - property: CHECK( init(main()), LTL(G ! call(reach_error())) )
+  property: CHECK( init(main()), LTL(G ! call(reach_error())) )
 externs:
-  - name: main
-    line: 13
-    column: 0
-    type: source
-  - name: __assert_fail
-    line: 3
-    column: 22
-    type: tainted_sink
-  - name: abort
-    line: 8
-    column: 27
-    type: tainted_sink
-  - name: __VERIFIER_nondet_uint
-    line: 14
-    column: 20
-    type: nondet_uint
+- line: 3
+  column: 22
+  function: __assert_fail
+  type: tainted_sink
+- line: 8
+  column: 27
+  function: abort
+  type: tainted_sink
+- line: 14
+  column: 20
+  function: __VERIFIER_nondet_uint
+  type: nondet_uint
 '''
 
 # Initialize yaml
@@ -214,41 +210,21 @@ yaml_dict['externs'] = []
 for node in icfg.getNodes():
     if isinstance(node, CallICFGNode):
         # main, __assert_fail, abort, __VERIFIER_nondet_uint
+        externs = {
+            '__assert_fail': 'tainted_sink',
+            'abort': 'tainted_sink',
+            '__VERIFIER_nondet_uint': 'nondet_uint',
+            'main': 'source'
+        }
+        
         source_loc = SourceLocation(node.getSourceLoc())
-        if node.getCalledFunction().getName() == "__assert_fail":
+        if node.getCalledFunction().getName() in externs.keys():
             yaml_dict['externs'].append({
                 'line': source_loc.getLnNo(),
                 'column': source_loc.getColNo(),
                 'function': node.getCalledFunction().getName(),
-                'type': 'tainted_sink'
+                'type': externs[node.getCalledFunction().getName()]
             })
-
-            pass
-        elif node.getCalledFunction().getName() == "abort":
-            yaml_dict['externs'].append({
-                'line': source_loc.getLnNo(),
-                'column': source_loc.getColNo(),
-                'function': node.getCalledFunction().getName(),
-                'type': 'tainted_sink'
-            })
-
-            pass
-        elif node.getCalledFunction().getName() == "__VERIFIER_nondet_uint":
-            yaml_dict['externs'].append({                
-                'line': source_loc.getLnNo(),
-                'column': source_loc.getColNo(),
-                'function': node.getCalledFunction().getName(),
-                'type': 'nondet_uint'
-            })
-            pass
-        elif node.getCalledFunction().getName() == "main":
-            yaml_dict['externs'].append({                
-                'line': source_loc.getLnNo(),
-                'column': source_loc.getColNo(),
-                'function': node.getCalledFunction().getName(),
-                'type': 'source'
-            })
-            pass
 
 with open('demo.yaml', 'w') as file:
     yaml.dump(yaml_dict, file, sort_keys=False)
