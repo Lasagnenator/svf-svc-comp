@@ -36,6 +36,7 @@ FEATURES = {
     '__VERIFIER_nondet_msg_t':   'nondet_msg_t',
     '__VERIFIER_nondet_sector_t':'nondet_sector_t',
     '__VERIFIER_nondet_short':   'nondet_short',
+    '__VERIFIER_nondet_ushort':  'nondet_ushort',
     '__VERIFIER_nondet_size_t':  'nondet_size_t',
     '__VERIFIER_nondet_u16':     'nondet_u16',
     '__VERIFIER_nondet_u32':     'nondet_u32',
