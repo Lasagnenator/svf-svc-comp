@@ -1,7 +1,7 @@
 #!/bin/sh
 
-externs="$(for path in ../sv-benchmarks/c/*; do
-    if [ "$path" = "extern_enumerate.sh" ]; then
+features="$(for path in ../sv-benchmarks/c/*; do
+    if [ "$path" = "feature_enumerate.sh" ]; then
         continue
     fi
     if [ -f "$path" ]; then
@@ -15,4 +15,4 @@ externs="$(for path in ../sv-benchmarks/c/*; do
     fi
 done)"
 
-echo "$externs" | sort | uniq | grep -E 'VERIFIER' | sed -E 's/ +/ /g' > verifier_enumeration.txt
+echo "$features" | sort | uniq | grep -E 'VERIFIER' | sed -E 's/ +/ /g' > verifier_enumeration.txt
