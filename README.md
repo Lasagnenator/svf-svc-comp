@@ -37,3 +37,10 @@ Notes:
 * `--prop` points to a file containing the desired property to be checked.
 * `--verbose` prints a lot of information about the internals.
 * `--witness` must be a writeable file path.
+
+## Dockerfile usage
+Attached is a dockerfile that when built into an image, provides an environment in which SVF can be built and run for the competition.
+
+Instructions for using the dockerfile (assuming that this repository has been cloned to a local machine with macOS/WSL), starting with the current directory as svf-svc-comp:
+* $ docker build -t svf-comp:01 .
+* $ docker run -itd svf-comp:01
