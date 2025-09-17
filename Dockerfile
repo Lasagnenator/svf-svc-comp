@@ -29,6 +29,7 @@ RUN set -ex; \
             && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1;
 RUN python3 -m pip install pysvf -i https://test.pypi.org/simple/
 RUN python3 -m pip install z3-solver
+RUN python3 -m pip install pyyaml
 
 # Fetch and build SVF source.
 RUN echo "Downloading LLVM and building SVF to " ${HOME}
