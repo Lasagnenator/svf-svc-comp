@@ -27,7 +27,8 @@ def main():
 
 
     # Im not sure of the actual input format, implemented it to follow the format for verification
-    # tasks from gitlab.com/sosy-lab/benchmarking/sv-benchmarks/
+    # tasks from gitlab.com/sosy-lab/benchmarking/sv-benchmarks/ but that seems to be
+    # different to whats actually used in the competition
 
     # parser = argparse.ArgumentParser()
     # parser.add_argument("yamlfile", help="yaml file that defines verification task")
@@ -54,8 +55,9 @@ def main():
     #         log(exc)
 
 
-# right now it doesnt do witness output, have to implement that later
+# Accepts a C source file, and traverses its ICFG using the SVF framework
 def runSVF(input_file_path):
+    # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
         c_code = f.read()
@@ -69,6 +71,7 @@ def runSVF(input_file_path):
     buffer.seek(0)
     log(buffer.read())
 
+    # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
     command = ["clang", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
@@ -91,9 +94,12 @@ def runSVF(input_file_path):
     ass3 = AbstractExecution(pag)
     ass3.analyse()
 
+    # Currently the results are stored as a dictionary in the AbstractExecution class
+    # feel free to change how its stored to be more convenient
     log(ass3.results)
 
 
+    ###TODO: right now it doesnt do witness output, have to implement that soon
 
     pysvf.releasePAG()
 

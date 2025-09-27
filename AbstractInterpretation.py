@@ -401,6 +401,9 @@ class AbstractExecution:
         self.widen_delay = 3
         self.addressMask = 0x7f000000
         self.flippedAddressMask = (self.addressMask^0xffffffff)
+
+        ###SVF SV-COMP-ADDITION
+        # storing results here for now, feel free to replace or update how we store it
         self.results = {}
         self.results["reach"] = []
 
@@ -582,7 +585,8 @@ class AbstractExecution:
     """
     def handleICFGNode(self, node: pysvf.ICFGNode):
         is_feasible, self.pre_abs_trace[node] = self.mergeStatesFromPredecessors(node)
-        
+
+        ###SVF SV-COMP-ADDITION
         ###TODO find some other way to propagate the results to the thing
         if isinstance(node, pysvf.CallICFGNode):
             callNode = node.asCall()

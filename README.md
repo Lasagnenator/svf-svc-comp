@@ -61,6 +61,8 @@ To explain what happens in the codebase, similar to what we did in assignment 3:
 * Traverse through the ICFG using abstract execution
 * If there's a bug/error in the C source code, then track it somehow (currently it just adds the reason and ICFGNode to a list)
 
+For the file `AbstractInterpreation.py`, theres some comments with the text `###SVF SV-COMP-ADDITION` to show where some changes have been made compared to what would be used for COMP6131 assignment 3.
+
 
 A running list of things to work on:
 * TODO: There's scripts for witness gen (yaml and graphml), now have to make our run of SVF output info to provide to those scripts, to generate the witnesses
