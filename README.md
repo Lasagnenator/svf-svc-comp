@@ -42,8 +42,9 @@ Notes:
 Attached is a dockerfile that when built into an image, provides an environment in which SVF can be built and run for the competition.
 
 Instructions for using the dockerfile (assuming that this repository has been cloned to a local machine with macOS/WSL), starting with the current directory as svf-svc-comp:
-``` $ docker build -t svf-comp:01 .
- $ docker run -itd svf-comp:01
+```
+$ docker build -t svf-comp:01 .
+$ docker run -itd svf-comp:01
 ```
 
 Now, it should be possible to access and work within the container environment using VSCode similar to how it could be done for COMP6131. (Pulling from the repo is easy, but pushing changes to the repo requires setting up the container to allow for SSHing (will set up later, soz)).
