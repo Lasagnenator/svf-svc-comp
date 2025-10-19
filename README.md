@@ -13,7 +13,8 @@ Now, it should be possible to access and work within the container environment u
 One thing to mention is that you should run the command `git checkout setup-tooling` to enter this branch to access these changes, since it's currently not on main/master (replace setup-tooling with the branch you're trying to test/work in if needed).
 
 Right now, there exists a script `python_svf.py`, and from the terminal in the container in VSCode, you can run:
-``` $ python3 python_svf.py c_source_file_path
+```
+ $ python3 python_svf.py c_source_file_path
 ```
 
 To explain what happens in the codebase, similar to what we did in assignment 3:
