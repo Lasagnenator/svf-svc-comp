@@ -402,6 +402,10 @@ class AbstractExecution:
         self.addressMask = 0x7f000000
         self.flippedAddressMask = (self.addressMask^0xffffffff)
 
+        ###SVF SV-COMP-ADDITION
+        # storing results here for now, feel free to replace or update how we store it
+        self.results = {}
+        self.results["reach"] = []
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -581,6 +585,17 @@ class AbstractExecution:
     """
     def handleICFGNode(self, node: pysvf.ICFGNode):
         is_feasible, self.pre_abs_trace[node] = self.mergeStatesFromPredecessors(node)
+
+        ###SVF SV-COMP-ADDITION
+        ###TODO find some other way to propagate the results to the thing
+        if isinstance(node, pysvf.CallICFGNode):
+            # because of how svf-comp has formatted their asserts, handling reachability detection is
+            # the same as handling assertions in the code
+            callNode = node.asCall()
+            if callNode.getCalledFunction().getName() == "reach_error":
+                self.results["reach"].append((is_feasible, callNode))
+        
+
         if not is_feasible:
             print(f"Infeasible for node {node.getId()}")
             return False
