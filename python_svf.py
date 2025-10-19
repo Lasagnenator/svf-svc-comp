@@ -98,6 +98,18 @@ def runSVF(input_file_path):
     # feel free to change how its stored to be more convenient
     log(ass3.results)
 
+    error_detected = False
+    for (is_feasible, callNode) in ass3.results["reach"]:
+        # if an unreach_call is ever feasible, 
+        # then a verifier_assert is provided with a false statement
+        error_detected |= is_feasible
+
+    if error_detected:
+        print("THERE ARE UNREACH/ASSERT ERRORS")
+    else:
+        print("NO UNREACH/ASSERT ERRORS")
+
+
 
     ###TODO: right now it doesnt do witness output, have to implement that soon
 

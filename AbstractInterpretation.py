@@ -589,10 +589,13 @@ class AbstractExecution:
         ###SVF SV-COMP-ADDITION
         ###TODO find some other way to propagate the results to the thing
         if isinstance(node, pysvf.CallICFGNode):
+            # because of how svf-comp has formatted their asserts, handling reachability detection is
+            # the same as handling assertions in the code
             callNode = node.asCall()
             if callNode.getCalledFunction().getName() == "reach_error":
                 self.results["reach"].append((is_feasible, callNode))
         
+
         if not is_feasible:
             print(f"Infeasible for node {node.getId()}")
             return False
