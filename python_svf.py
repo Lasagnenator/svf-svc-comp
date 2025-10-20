@@ -117,6 +117,7 @@ def runSVF(input_file_path, prop_file_path):
             error_detected |= is_feasible
 
         if error_detected:
+            print("REACH Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
         else:
             witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
@@ -124,6 +125,8 @@ def runSVF(input_file_path, prop_file_path):
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
         if len(ass3.results["bufferoverflow"]) > 0:
+            # idk if this is the right type of memory error
+            print("OVERFLOW Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
         else:
             witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
