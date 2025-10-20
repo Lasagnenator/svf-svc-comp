@@ -406,6 +406,7 @@ class AbstractExecution:
         # storing results here for now, feel free to replace or update how we store it
         self.results = {}
         self.results["reach"] = []
+        self.results["bufferoverflow"] = []
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -1237,6 +1238,7 @@ class AbstractExecution:
                     if int(access_offset.ub()) >= obj_size:
                         msg = "Buffer overflow detected. Objsize: {}, but try to access offset {}".format(obj_size, access_offset)
                         self.buf_overflow_helper.reportBufOverflow(stmt.getICFGNode(), msg)
+                        self.results["bufferoverflow"].append(stmt)
 
     """
     Handle external function calls and update the abstract state.
