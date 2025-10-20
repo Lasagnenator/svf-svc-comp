@@ -78,3 +78,45 @@ def generate_witness(result, args, output):
 
     with open(output, "w") as f:
         f.write(BASE_TEMPLATE.format(**data))
+
+# i didnt want to remove the old one so i copy pasted
+def generate_witness_v2(result, source_file_path, prop_file_path, output):
+    if "Correct" in result:
+        witness_type = "correctness_witness"
+        violation = ""
+    elif "Incorrect" in result:
+        witness_type = "violation_witness"
+        violation = VIOLATION_KEY
+    else:
+        # Unknown, do not produce a witness file.
+        return
+
+    with open(source_file_path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+    with open(prop_file_path, "r") as f:
+        spec = f.read().strip()
+
+    bits = "32bit"
+
+    data = {
+        "witness_type": witness_type,
+        "file": source_file_path,
+        "hash": file_hash,
+        "spec": spec,
+        "version": VERSION,
+        "bits": bits,
+        "creation_time": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
+        "violation": violation
+    }
+
+    if output == "":
+        log("No witness output requested.")
+        return
+
+    log(f"Witness output path: {output}")
+    log("Witness output data:")
+    log(data)
+
+    with open(output, "w") as f:
+        f.write(BASE_TEMPLATE.format(**data))
+
