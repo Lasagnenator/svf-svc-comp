@@ -17,13 +17,18 @@ from AbstractInterpretation import *
 def main():
     # this implementation just accepts the file to do testing on
     parser = argparse.ArgumentParser()
-    parser.add_argument("sourcefile", help="c source file to be verified")
-    parser.add_argument("propfile", help="property file to be checked for")
+    parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
+    parser.add_argument("--prop", help="property file", default=None)
+    parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
+    parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
+    parser.add_argument("--witness", default="witness.graphml", help="witness output")
+    parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
 
-    runSVF(args.sourcefile, args.propfile)
+    runSVF(args.c_file, args.prop)
 
 
 
@@ -50,7 +55,7 @@ def main():
 
 
     #         # Currently attempting to modify our use of SVF itself instead of modifying the code
-            
+
 
     #     except yaml.YAMLError as exc:
     #         log(exc)
@@ -107,12 +112,12 @@ def runSVF(input_file_path, prop_file_path):
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
         # their feasibility will be added to this part of the results dictionary
-        # 
+        #
         # if an unreach_call node is reachable, then it will always be added to the list ass3.results["reach"] = [list of nodes]
         #
         # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
         for (is_feasible, callNode) in ass3.results["reach"]:
-            # if an unreach_call is ever feasible, 
+            # if an unreach_call is ever feasible,
             # then a verifier_assert is provided with a false statement
             error_detected |= is_feasible
 
@@ -139,4 +144,3 @@ def runSVF(input_file_path, prop_file_path):
 
 if __name__ == "__main__":
     main()
-
