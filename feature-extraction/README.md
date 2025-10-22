@@ -1,5 +1,5 @@
 # SVC Extraction Demo
-
+To run this locally outside of SVC
 ## Prerequisite
 
 - OS: MacOS or Ubuntu >=22.04
@@ -23,6 +23,8 @@ cd SVC-Extraction
 ```
 python3 extract.py multivar_1-1.ll
 ```
+
+Note: The initial commit of this component of SVC was primarily written by bjjwwang and ConstantlyRecompiling.
 
 ## TODO
 - Support Line and Column display.
