@@ -28,7 +28,7 @@ def main():
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
 
-    runSVF(args.c_file, args.prop)
+    runSVF(args.c_file, args.prop, args.witness)
 
 
 
@@ -62,7 +62,7 @@ def main():
 
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path):
+def runSVF(input_file_path, prop_file_path, witness_file_path):
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -123,18 +123,18 @@ def runSVF(input_file_path, prop_file_path):
 
         if error_detected:
             print("REACH Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
         else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
     elif prop_file_name == 'no-overflow.prp':
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
         if len(ass3.results["bufferoverflow"]) > 0:
             # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
         else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
 
 
     ###TODO: right now it doesnt do witness output, have to implement that soon

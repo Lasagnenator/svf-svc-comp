@@ -96,7 +96,7 @@ def generate_witness_v2(result, source_file_path, prop_file_path, output):
     with open(prop_file_path, "r") as f:
         spec = f.read().strip()
 
-    bits = "32bit"
+    bits = "64bit"
 
     data = {
         "witness_type": witness_type,
@@ -119,4 +119,3 @@ def generate_witness_v2(result, source_file_path, prop_file_path, output):
 
     with open(output, "w") as f:
         f.write(BASE_TEMPLATE.format(**data))
-
