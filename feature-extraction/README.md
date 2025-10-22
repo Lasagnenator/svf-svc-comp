@@ -1,5 +1,5 @@
 # SVC Extraction Demo
-To run this locally outside of SVC
+To run this locally outside of SVC, follow the below instructions:
 ## Prerequisite
 
 - OS: MacOS or Ubuntu >=22.04
