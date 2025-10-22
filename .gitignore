@@ -4,3 +4,7 @@ working.ll
 svf
 witness.yml
 witness.graphml
+venv
+pysvf
+yaml
+z3
