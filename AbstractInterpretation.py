@@ -1207,7 +1207,7 @@ class AbstractExecution:
     Detect buffer overflows in the given statement.
 
     TODO: handle GepStmt `lhs = rhs + off` and detect buffer overflow
-    Step 1: For each `obj \in pts(rhs)`, get the size of allocated baseobj (entire mem object) via `obj_size = svfir->getBaseObj(objId)->getByteSizeOfObj();`
+    Step 1: For each `obj in pts(rhs)`, get the size of allocated baseobj (entire mem object) via `obj_size = svfir->getBaseObj(objId)->getByteSizeOfObj();`
     There is a buffer overflow if `accessOffset.ub() >= obj_size`, where accessOffset is obtained via `getAccessOffset`
     Step 2: invoke `reportBufOverflow` with the current ICFGNode if an overflow is detected
 
