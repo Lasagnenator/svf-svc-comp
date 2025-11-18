@@ -13,6 +13,7 @@ from util import *
 import strategies
 import witness_output
 from AbstractInterpretation import *
+from cfl_reachability.py import CFLreachability
 
 def main():
     # this implementation just accepts the file to do testing on
@@ -63,76 +64,75 @@ def runSVF(input_file_path, prop_file_path):
     with open(input_file_path, "r") as f:
         c_code = f.read()
         c_code = nondet.generate_nondet_replacing(c_code)
-
         buffer.write(c_code)
-
-    buffer.flush()
-
+        buffer.flush()
     log("Generated file:")
     buffer.seek(0)
     log(buffer.read())
 
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
-
-    command = ["clang", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
-    command.append(buffer.name)
-
-    log(f"Running clang with command: {' '.join(command)}")
+    command = [
+        "clang", "-S", "-c", "-O0", "-fno-discard-value-names",
+        "-g", "-emit-llvm", "-o", working_file.name,
+        buffer.name
+    ]
+    log(f"Running clang with command: {&apos; &apos;.join(command)}")
     retcode = subprocess.run(command).returncode
     log(f"Clang exitted with code {retcode}.")
-
     if retcode != 0:
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
         log("ERROR(CLANG)")
         exit(retcode)
-
     buffer.close()
 
-    # This code is copied from python/test-ae.py to use SVF
+    prop_file_name = prop_file_path.split(&apos;/&apos;)[-1]
+
     pysvf.buildSVFModule(working_file.name)
     pag = pysvf.getPAG()
-    ass3 = AbstractExecution(pag)
-    ass3.analyse()
 
-    # Currently the results are stored as a dictionary in the AbstractExecution class
-    # feel free to change how its stored to be more convenient
-    log(ass3.results)
+    if prop_file_name == &apos;unreach-call.prp&apos;:
+        log("Running CFL reachability analysis...")
+        cfl = CFLreachability(pag)
+        cfl.analyze()
+        results = cfl.results
 
-
-    # parse input prop file path to find the file name
-    prop_file_name = prop_file_path.split('/')[-1]
-
-    if prop_file_name == 'unreach-call.prp':
         error_detected = False
-        # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
-        # their feasibility will be added to this part of the results dictionary
-        # 
-        # if an unreach_call node is reachable, then it will always be added to the list ass3.results["reach"] = [list of nodes]
-        #
-        # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
-        for (is_feasible, callNode) in ass3.results["reach"]:
-            # if an unreach_call is ever feasible, 
-            # then a verifier_assert is provided with a false statement
+        for (is_feasible, callNode) in results["reach"]:
             error_detected |= is_feasible
 
         if error_detected:
             print("REACH Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2(
+                "Incorrect", input_file_path, prop_file_path, "witness.xml"
+            )
         else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
-    elif prop_file_name == 'no-overflow.prp':
-        # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
-        # (kinda because of how our use of the SVF python API is done)
+            witness_output.generate_witness_v2(
+                "Correct", input_file_path, prop_file_path, "witness.xml"
+            )
+
+    elif prop_file_name == &apos;no-overflow.prp&apos;:
+
+        log("Running Abstract Execution (AE) for overflow...")
+        ass3 = AbstractExecution(pag)
+        ass3.analyse()
+        log(ass3.results)
+
         if len(ass3.results["bufferoverflow"]) > 0:
-            # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2(
+                "Incorrect", input_file_path, prop_file_path, "witness.xml"
+            )
         else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, "witness.xml")
+            witness_output.generate_witness_v2(
+                "Correct", input_file_path, prop_file_path, "witness.xml"
+            )
 
+    else:
+        log(f"Unsupported property file: {prop_file_name}")
+        pysvf.releasePAG()
+        sys.exit(1)
 
-    ###TODO: right now it doesnt do witness output, have to implement that soon
 
     pysvf.releasePAG()
 

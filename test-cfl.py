@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 import pysvf
-from cfl_reachability import CFLreachability   # 你自己的文件名
+from cfl_reachability import CFLreachability  
 
 def compile_to_bc(src):
     if src.endswith(".c"):
@@ -20,8 +20,10 @@ if __name__ == "__main__":
 
     input_file = sys.argv[1]
 
+    bcfile = compile_to_bc(input_file)
+
     print("Building SVF module...")
-    pysvf.buildSVFModule(input_file)
+    pysvf.buildSVFModule(bcfile)
 
     # Get the Program Assignment Graph
     pag = pysvf.getPAG()
