@@ -1,6 +1,16 @@
+import os
+import subprocess
 import sys
 import pysvf
 from cfl_reachability import CFLreachability   # 你自己的文件名
+
+def compile_to_bc(src):
+    if src.endswith(".c"):
+        bc = src.replace(".c", ".bc")
+        cmd = ["clang", "-S", "-c", "-emit-llvm", "-O0", "-g", "-o", bc, src]
+        subprocess.check_call(cmd)
+        return bc
+    return src
 
 if __name__ == "__main__":
     # check sys.argv
