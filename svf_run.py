@@ -31,36 +31,6 @@ def main():
     runSVF(args.c_file, args.prop, args.witness)
 
 
-
-    # Im not sure of the actual input format, implemented it to follow the format for verification
-    # tasks from gitlab.com/sosy-lab/benchmarking/sv-benchmarks/ but that seems to be
-    # different to whats actually used in the competition
-
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("yamlfile", help="yaml file that defines verification task")
-
-    # args, extra = parser.parse_known_args()
-    # log(f"Arguments: {args}")
-
-    # # Reading verification specification from provided yaml file
-    # with open(args.yamlfile) as stream:
-    #     try:
-    #         yaml_contents = yaml.safe_load(stream)
-    #         input_file_name = yaml_contents["input_files"]
-    #         path_prefix = args.yamlfile[::-1].split("/", 1)[1][::-1]
-    #         input_file_path = path_prefix + "/" + input_file_name
-
-    #         # This creates the paths for the property files (assuming sv-benchmarks is installed)
-    #         property_files = [(x["property_file"]).replace("../", "sv-benchmarks/c/") for x in yaml_contents["properties"]]
-
-
-    #         # Currently attempting to modify our use of SVF itself instead of modifying the code
-
-
-    #     except yaml.YAMLError as exc:
-    #         log(exc)
-
-
 # Accepts a C source file, and traverses its ICFG using the SVF framework
 def runSVF(input_file_path, prop_file_path, witness_file_path):
     # Preprocesses the C source file by replacing the nondet function calls
