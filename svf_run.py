@@ -67,9 +67,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
         c_code = f.read()
-        c_code = nondet.generate_nondet_replacing(c_code)
+        nondet_defs = nondet.generate_nondet_replacing(c_code)
 
         buffer.write(c_code)
+        buffer.write(nondet_defs)
 
     buffer.flush()
 
