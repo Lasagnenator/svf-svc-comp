@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-
+import pysvf
 import argparse
 import yaml
 import os
@@ -13,6 +13,7 @@ from util import *
 import strategies
 import witness_output
 from AbstractInterpretation import *
+from cfl_reachability import CFLreachability
 
 def main():
     # this implementation just accepts the file to do testing on
@@ -37,10 +38,9 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
         c_code = f.read()
-        nondet_defs = nondet.generate_nondet(c_code)
+        replaced_code = nondet.generate_nondet_replacing(c_code)
 
-        buffer.write(c_code)
-        buffer.write(nondet_defs)
+        buffer.write(replaced_code)
 
     buffer.flush()
 
@@ -68,26 +68,25 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     # This code is copied from python/test-ae.py to use SVF
     pysvf.buildSVFModule(working_file.name)
     pag = pysvf.getPAG()
-    ass3 = AbstractExecution(pag)
-    ass3.analyse()
-
-    # Currently the results are stored as a dictionary in the AbstractExecution class
-    # feel free to change how its stored to be more convenient
-    log(ass3.results)
-
 
     # parse input prop file path to find the file name
     prop_file_name = prop_file_path.split('/')[-1]
 
     if prop_file_name == 'unreach-call.prp':
+        log("Running CFL reachability analysis...")
+
+        cfl = CFLreachability(pag)
+        cfl.analyze()
+        results = cfl.results
+
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
         # their feasibility will be added to this part of the results dictionary
         #
-        # if an unreach_call node is reachable, then it will always be added to the list ass3.results["reach"] = [list of nodes]
+        # if an unreach_call node is reachable, then it will always be added to the list results["reach"] = [list of nodes]
         #
         # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
-        for (is_feasible, callNode) in ass3.results["reach"]:
+        for (is_feasible, callNode) in results["reach"]:
             # if an unreach_call is ever feasible,
             # then a verifier_assert is provided with a false statement
             error_detected |= is_feasible
@@ -98,9 +97,12 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         else:
             witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
     elif prop_file_name == 'no-overflow.prp':
+        ae = AbstractExecution(pag)
+        ae.analyse()
+        log(ae.results)
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
-        if len(ass3.results["bufferoverflow"]) > 0:
+        if len(ae.results["bufferoverflow"]) > 0:
             # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
