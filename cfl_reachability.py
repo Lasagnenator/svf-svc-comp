@@ -56,11 +56,20 @@ class CFLreachability:
             # -------------------------------------------------
             # handle Ret node
             elif isinstance(node, pysvf.RetICFGNode):
+                # don't handle external returns
+                callnode = node.getCallICFGNode()
+                if callnode and pysvf.isExtCall(callnode.getCalledFunction()):
+                    continue
                 # pop stack
                 if stack:
-                    new_stack = stack[:-1]   
+                    top = stack[-1]   
                 else:
-                    new_stack = stack
+                    continue # empty stack, skip
+
+                expected_fun = node.getFun()
+                if top != expected_fun:
+                    continue # mismatched stack, skip
+                new_stack = stack[:-1]
 
                 # handle the nodes after return the current function
                 for e in node.getOutEdges():
