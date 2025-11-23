@@ -34,16 +34,13 @@ class CFLreachability:
                     self.results["reach"].append((True, node))
             # -------------------------------------------------
             # handle Call node
-            if isinstance(node, pysvf.CallICFGNode):
                 callee = node.getCalledFunction()
-
-                # we don't need to handle external calls
-                if pysvf.isExtCall(callee):
-                    pass
                 # handle internal calls
-                else:
+                # we don't need to handle external calls
+                if callee and not pysvf.isExtCall(callee):
                     # push stack
-                    new_stack = stack + (callee,)
+                    callee_name = callee.getName()
+                    new_stack = stack + (callee_name,)
 
                     # jump to callee entry
                     entry = self.icfg.getFunEntryICFGNode(callee)
@@ -52,7 +49,7 @@ class CFLreachability:
                 # also follow normal CFG to ret node
                 ret_node = node.getRetICFGNode()
                 self.worklist.append((ret_node, stack))  # will pop when handle ret
-
+                continue
             # -------------------------------------------------
             # handle Ret node
             elif isinstance(node, pysvf.RetICFGNode):
@@ -66,8 +63,8 @@ class CFLreachability:
                 else:
                     continue # empty stack, skip
 
-                expected_fun = node.getFun()
-                if top != expected_fun:
+                current_name = node.getFun().getName()
+                if top != current_name:
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
 
