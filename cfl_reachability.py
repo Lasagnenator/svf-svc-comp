@@ -33,12 +33,11 @@ class CFLreachability:
                 callee = node.getCalledFunction()
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
-            if isinstance(node, pysvf.CallICFGNode):
                 # we won't handle them if they are not in feasible_ids
                 if node.getId() not in self.feasible_ids:
                     continue
-            # -------------------------------------------------
-            # handle Call node
+                # -------------------------------------------------
+                # handle Call node
                 callee = node.getCalledFunction()
                 # handle internal calls
                 # we don't need to handle external calls
