@@ -32,6 +32,7 @@ class CFLreachability:
                 callee = node.getCalledFunction()
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
+            if isinstance(node, pysvf.CallICFGNode):
             # -------------------------------------------------
             # handle Call node
                 callee = node.getCalledFunction()
