@@ -1,6 +1,6 @@
 import pysvf
 class CFLreachability:
-    def __init__(self, pag: pysvf.SVFIR):
+    def __init__(self, pag: pysvf.SVFIR, feasible_ids=None):
         self.feasible_ids = feasible_ids or set()
         self.svfir = pag
         self.icfg = pag.getICFG()
