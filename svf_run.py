@@ -73,11 +73,21 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     prop_file_name = prop_file_path.split('/')[-1]
 
     if prop_file_name == 'unreach-call.prp':
+        # ae first
+        ae = AbstractExecution(pag)
+        ae.analyse()
+        log(ae.results)
+
+        feasible_ids = set()
+        for (is_feasible, callNode) in ae.results.get("reach", []):
+            if is_feasible:
+                feasible_ids.add(callNode.getId())
+        # Then CFL
         log("Running CFL reachability analysis...")
 
         cfl = CFLreachability(pag)
         cfl.analyze()
-        results = cfl.results
+        cfl_results = cfl.results
 
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
@@ -86,15 +96,15 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         # if an unreach_call node is reachable, then it will always be added to the list results["reach"] = [list of nodes]
         #
         # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
-        for (is_feasible, callNode) in results["reach"]:
-            # if an unreach_call is ever feasible,
-            # then a verifier_assert is provided with a false statement
-            error_detected |= is_feasible
+        for (is_reachable, callNode) in cfl_results.get("reach", []):
+            if is_reachable and callNode.getId() in feasible_ids:
+                error_detected = True
 
         if error_detected:
             print("REACH Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
         else:
+            print("REACH Correct")
             witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
     elif prop_file_name == 'no-overflow.prp':
         ae = AbstractExecution(pag)
