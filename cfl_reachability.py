@@ -21,7 +21,7 @@ class CFLreachability:
         while self.worklist:
             # get the first function from worklist
             node, stack = self.worklist.pop(0)
-            state_key = (node.getFun().getName(), stack)
+            state_key = (node.getId(), stack)
             # skip if already visited
             if state_key in self.visited:
                 continue
