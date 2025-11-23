@@ -1,6 +1,7 @@
 import pysvf
 class CFLreachability:
     def __init__(self, pag: pysvf.SVFIR):
+        self.feasible_ids = feasible_ids or set()
         self.svfir = pag
         self.icfg = pag.getICFG()
         self.worklist = []
@@ -33,6 +34,9 @@ class CFLreachability:
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
             if isinstance(node, pysvf.CallICFGNode):
+                # we won't handle them if they are not in feasible_ids
+                if node.getId() not in self.feasible_ids:
+                    continue
             # -------------------------------------------------
             # handle Call node
                 callee = node.getCalledFunction()

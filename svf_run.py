@@ -85,7 +85,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         # Then CFL
         log("Running CFL reachability analysis...")
 
-        cfl = CFLreachability(pag)
+        cfl = CFLreachability(pag, feasible_ids)
         cfl_results = cfl.analyze()
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
