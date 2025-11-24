@@ -1,130 +1,82 @@
-#! /usr/bin/env python3
-
 import pysvf
-import argparse
-import yaml
-import os
-import sys
-import subprocess
-import tempfile
+class CFLreachability:
+    def __init__(self, pag: pysvf.SVFIR):
+        self.svfir = pag
+        self.icfg = pag.getICFG()
+        self.worklist = []
+        self.visited = set()
+        self.call_stack = []
+        self.results = {"reach": []}
+    def analyze(self):
+        # main function
+        main_fun = self.svfir.getFunObjVar("main")
+        entry = self.icfg.getFunEntryICFGNode(main_fun)
+        self.worklist.append((entry, ()))
+        # remain codes
+        self.run()
+        return self.results
+        
+    def run(self):
+        # repeat until worklist is empty (all functions processed)
+        while self.worklist:
+            # get the first function from worklist
+            node, stack = self.worklist.pop(0)
+            state_key = (node.getFun().getName(), stack)
+            # skip if already visited
+            if state_key in self.visited:
+                continue
+            self.visited.add(state_key)
+            # check if Call node is not exists
+            if isinstance(node, pysvf.CallICFGNode):
+                # get the next called function
+                callee = node.getCalledFunction()
+                if callee and callee.getName() == "reach_error":
+                    self.results["reach"].append((True, node))
+            if isinstance(node, pysvf.CallICFGNode):
+            # -------------------------------------------------
+            # handle Call node
+                callee = node.getCalledFunction()
+                # handle internal calls
+                # we don't need to handle external calls
+                if callee and not pysvf.isExtCall(callee):
+                    # push stack
+                    callee_name = callee.getName()
+                    new_stack = stack + (callee_name,)
 
-import nondet
-from util import *
-import strategies
-import witness_output
-from AbstractInterpretation import *
-from cfl_reachability import CFLreachability
+                    # jump to callee entry
+                    entry = self.icfg.getFunEntryICFGNode(callee)
+                    self.worklist.append((entry, new_stack))
 
-def main():
-    # this implementation just accepts the file to do testing on
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--version", action="version", version=VERSION)
-    parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
-    parser.add_argument("--prop", help="property file", default=None)
-    parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
-    parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--witness", default="witness.graphml", help="witness output")
-    parser.add_argument("c_file", help="input C file in SV-Comp format")
+                # also follow normal CFG to ret node
+                ret_node = node.getRetICFGNode()
+                self.worklist.append((ret_node, stack))  # will pop when handle ret
+                continue
+            # -------------------------------------------------
+            # handle Ret node
+            elif isinstance(node, pysvf.RetICFGNode):
+                # don't handle external returns
+                callnode = node.getCallICFGNode()
+                if callnode and pysvf.isExtCall(callnode.getCalledFunction()):
+                    continue
+                # pop stack
+                if stack:
+                    top = stack[-1]   
+                else:
+                    continue # empty stack, skip
 
-    args, extra = parser.parse_known_args()
-    log(f"Arguments: {args}")
+                current_name = node.getFun().getName()
+                if top != current_name:
+                    continue # mismatched stack, skip
+                new_stack = stack[:-1]
 
-    runSVF(args.c_file, args.prop, args.witness)
+                # handle the nodes after return the current function
+                for e in node.getOutEdges():
+                    dst = e.getDstNode()
+                    self.worklist.append((dst, new_stack))
 
-
-# Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path):
-    # Preprocesses the C source file by replacing the nondet function calls
-    buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
-    with open(input_file_path, "r") as f:
-        c_code = f.read()
-        replaced_code = nondet.generate_nondet_replacing(c_code)
-
-        buffer.write(replaced_code)
-
-    buffer.flush()
-
-    log("Generated file:")
-    buffer.seek(0)
-    log(buffer.read())
-
-    # Compiles the C source file to LLVMIR
-    working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
-
-    command = ["clang", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
-    command.append(buffer.name)
-
-    log(f"Running clang with command: {' '.join(command)}")
-    retcode = subprocess.run(command).returncode
-    log(f"Clang exitted with code {retcode}.")
-
-    if retcode != 0:
-        log(f"Clang failed to output {working_file.name}. SVF will fail.")
-        log("ERROR(CLANG)")
-        exit(retcode)
-
-    buffer.close()
-
-    # This code is copied from python/test-ae.py to use SVF
-    pysvf.buildSVFModule(working_file.name)
-    pag = pysvf.getPAG()
-
-    # parse input prop file path to find the file name
-    prop_file_name = prop_file_path.split('/')[-1]
-
-    if prop_file_name == 'unreach-call.prp':
-        # ae first
-        ae = AbstractExecution(pag)
-        ae.analyse()
-        log(ae.results)
-
-        feasible_ids = set()
-        for (is_feasible, callNode) in ae.results.get("reach", []):
-            if is_feasible and callNode is not None:
-                feasible_ids.add(callNode.getId())
-        # Then CFL
-        log("Running CFL reachability analysis...")
-
-        cfl = CFLreachability(pag)
-        cfl_results = cfl.analyze()
-        error_detected = False
-        # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
-        # their feasibility will be added to this part of the results dictionary
-        #
-        # if an unreach_call node is reachable, then it will always be added to the list results["reach"] = [list of nodes]
-        #
-        # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
-        for (is_reachable, callNode) in cfl_results.get("reach", []):
-            if is_reachable and callNode and callNode.getId() in feasible_ids:
-                error_detected = True
-                break
-
-        if error_detected:
-            print("REACH Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
-        elif len(ae.results["reach"]) == 0:
-            print("REACH UNKNOWN")
-        else:
-            print("REACH Correct")
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
-    elif prop_file_name == 'no-overflow.prp':
-        ae = AbstractExecution(pag)
-        ae.analyse()
-        log(ae.results)
-        # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
-        # (kinda because of how our use of the SVF python API is done)
-        if len(ae.results.get("bufferoverflow", [])) > 0:
-            # idk if this is the right type of memory error
-            print("OVERFLOW Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
-        else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
-
-
-    ###TODO: right now it doesnt do witness output, have to implement that soon
-
-    pysvf.releasePAG()
-
-
-if __name__ == "__main__":
-    main()
+            # -------------------------------------------------
+            # handle normal node
+            else:
+                for e in node.getOutEdges():
+                    dst = e.getDstNode()
+                    self.worklist.append((dst, stack))
