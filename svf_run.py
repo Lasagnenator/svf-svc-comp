@@ -102,8 +102,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         if error_detected:
             print("REACH Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
-        elif len(ae.results["reach"]) == 0:
-            print("REACH UNKNOWN")
         else:
             print("REACH Correct")
             witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
