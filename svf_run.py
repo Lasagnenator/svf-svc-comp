@@ -80,13 +80,15 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
 
         feasible_ids = set()
         for (is_feasible, callNode) in ae.results.get("reach", []):
-            if is_feasible and callNode is not None:
+            if is_feasible:
                 feasible_ids.add(callNode.getId())
         # Then CFL
         log("Running CFL reachability analysis...")
 
         cfl = CFLreachability(pag)
-        cfl_results = cfl.analyze()
+        cfl.analyze()
+        cfl_results = cfl.results
+
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
         # their feasibility will be added to this part of the results dictionary
@@ -95,9 +97,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         #
         # we only care about the reachable nodes, because if they are reachable, there is an error in the C code
         for (is_reachable, callNode) in cfl_results.get("reach", []):
-            if is_reachable and callNode and callNode.getId() in feasible_ids:
+            if is_reachable and callNode.getId() in feasible_ids:
                 error_detected = True
-                break
 
         if error_detected:
             print("REACH Incorrect")
@@ -111,7 +112,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         log(ae.results)
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
-        if len(ae.results.get("bufferoverflow", [])) > 0:
+        if len(ae.results["bufferoverflow"]) > 0:
             # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
