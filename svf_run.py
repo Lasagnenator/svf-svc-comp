@@ -85,7 +85,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         # Then CFL
         log("Running CFL reachability analysis...")
 
-        cfl = CFLreachability(pag, feasible_ids)
+        cfl = CFLreachability(pag)
         cfl_results = cfl.analyze()
         error_detected = False
         # currently for the nodes with unreach_call, if they are traversed to from the ICFG traversal,
@@ -111,7 +111,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         log(ae.results)
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
-        if len(ae.results.get(["bufferoverflow"], [])) > 0:
+        if len(ae.results.get("bufferoverflow", [])) > 0:
             # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
             witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)

@@ -1,7 +1,6 @@
 import pysvf
 class CFLreachability:
-    def __init__(self, pag: pysvf.SVFIR, feasible_ids=None):
-        self.feasible_ids = feasible_ids or set()
+    def __init__(self, pag: pysvf.SVFIR):
         self.svfir = pag
         self.icfg = pag.getICFG()
         self.worklist = []
@@ -22,7 +21,13 @@ class CFLreachability:
         while self.worklist:
             # get the first function from worklist
             node, stack = self.worklist.pop(0)
-            state_key = (node.getId(), stack)
+            if len(stack) >= 2:
+                ctx = (stack[-2], stack[-1])
+            elif len(stack) == 1:
+                ctx = (None, stack[-1])
+            else:
+                ctx = (None, None)
+            state_key = (node.getId(), ctx)
             # skip if already visited
             if state_key in self.visited:
                 continue
@@ -33,9 +38,6 @@ class CFLreachability:
                 callee = node.getCalledFunction()
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
-                # we won't handle them if they are not in feasible_ids
-                if node.getId() not in self.feasible_ids:
-                    continue
                 # -------------------------------------------------
                 # handle Call node
                 callee = node.getCalledFunction()
@@ -44,7 +46,7 @@ class CFLreachability:
                 if callee and not pysvf.isExtCall(callee):
                     # push stack
                     callee_name = callee.getName()
-                    new_stack = stack + (callee_name,)
+                    new_stack = (stack + (callee_name,))[-2:]
 
                     # jump to callee entry
                     entry = self.icfg.getFunEntryICFGNode(callee)
