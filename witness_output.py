@@ -1,5 +1,10 @@
+"""
+Output a format 1.0 simple witness.
+
+This only supports outputs of violation or correctness with no invariants.
+"""
+
 import hashlib
-import os
 import datetime
 
 from util import *
@@ -39,48 +44,7 @@ BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 
 VIOLATION_KEY = '<data key="violation">true</data>'
 
-def generate_witness(result, args, output):
-    if "Correct" in result:
-        witness_type = "correctness_witness"
-        violation = ""
-    elif "Incorrect" in result:
-        witness_type = "violation_witness"
-        violation = VIOLATION_KEY
-    else:
-        # Unknown, do not produce a witness file.
-        return
-
-    with open(args.c_file, "rb") as f:
-        file_hash = hashlib.sha256(f.read()).hexdigest()
-    with open(args.prop, "r") as f:
-        spec = f.read().strip()
-
-    bits = "32bit" if args.bits == "32" else "64bit"
-
-    data = {
-        "witness_type": witness_type,
-        "file": args.c_file,
-        "hash": file_hash,
-        "spec": spec,
-        "version": VERSION,
-        "bits": bits,
-        "creation_time": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
-        "violation": violation
-    }
-
-    if output == "":
-        log("No witness output requested.")
-        return
-
-    log(f"Witness output path: {output}")
-    log("Witness output data:")
-    log(data)
-
-    with open(output, "w") as f:
-        f.write(BASE_TEMPLATE.format(**data))
-
-# i didnt want to remove the old one so i copy pasted
-def generate_witness_v2(result, source_file_path, prop_file_path, output):
+def generate_witness(result, source_file_path, prop_file_path, output):
     if "Correct" in result:
         witness_type = "correctness_witness"
         violation = ""
@@ -96,6 +60,8 @@ def generate_witness_v2(result, source_file_path, prop_file_path, output):
     with open(prop_file_path, "r") as f:
         spec = f.read().strip()
 
+    # TODO: Identify if this needs to be reverted to copy the spec.
+    # SVF-SVC only works in 64-bit mode but programs can be input as 32-bit.
     bits = "64bit"
 
     data = {

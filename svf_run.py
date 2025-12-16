@@ -2,15 +2,12 @@
 
 import pysvf
 import argparse
-import yaml
-import os
-import sys
 import subprocess
 import tempfile
+import traceback
 
 import nondet
 from util import *
-import strategies
 import witness_output
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
@@ -28,9 +25,9 @@ def main():
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
+    log(f"Extra unknown arguments: {extra}")
 
     runSVF(args.c_file, args.prop, args.witness)
-
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
 def runSVF(input_file_path, prop_file_path, witness_file_path):
@@ -38,9 +35,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
         c_code = f.read()
-        replaced_code = nondet.generate_nondet_replacing(c_code)
+        nondet_defs = nondet.generate_nondet(c_code)
 
-        buffer.write(replaced_code)
+        buffer.write(c_code)
+        buffer.write(nondet_defs)
 
     buffer.flush()
 
@@ -60,24 +58,34 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
 
     if retcode != 0:
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
-        log("ERROR(CLANG)")
-        exit(retcode)
+        fail("ERROR(CLANG)", retcode)
 
     buffer.close()
 
-    # This code is copied from python/test-ae.py to use SVF
-    pysvf.buildSVFModule(working_file.name)
-    pag = pysvf.getPAG()
+    try:
+        # This code is copied from python/test-ae.py to use SVF
+        pysvf.buildSVFModule(working_file.name)
+        pag = pysvf.getPAG()
+    except Exception as e:
+        log(f"pysvf: Failed with {e}. SVF-SVC will fail.")
+        log_exception(e)
+        fail("ERROR(SVF)")
 
     # parse input prop file path to find the file name
     prop_file_name = prop_file_path.split('/')[-1]
 
-    if prop_file_name == 'unreach-call.prp':
-        # ae first
+    # ae first
+    try:
         ae = AbstractExecution(pag)
         ae.analyse()
         log(ae.results)
+    except Exception as e:
+        log(f"AbstractExecution: Failed with {e}. SVF-SVC will not continue.")
+        log_exception(e)
+        fail("ERROR(AE)")
 
+    if prop_file_name == 'unreach-call.prp':
+        # Reachability
         feasible_ids = set()
         for (is_feasible, callNode) in ae.results.get("reach", []):
             if is_feasible and callNode is not None:
@@ -101,25 +109,28 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
 
         if error_detected:
             print("REACH Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
+            correctness = "Incorrect"
         else:
             print("REACH Correct")
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
+            correctness = "Correct"
     elif prop_file_name == 'no-overflow.prp':
-        ae = AbstractExecution(pag)
-        ae.analyse()
-        log(ae.results)
+        # TODO: Identify if this is the correct memory error type.
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
         if len(ae.results.get("bufferoverflow", [])) > 0:
-            # idk if this is the right type of memory error
             print("OVERFLOW Incorrect")
-            witness_output.generate_witness_v2("Incorrect", input_file_path, prop_file_path, witness_file_path)
+            correctness = "Incorrect"
         else:
-            witness_output.generate_witness_v2("Correct", input_file_path, prop_file_path, witness_file_path)
+            print("OVERFLOW Correct")
+            correctness = "Correct"
 
+    else:
+        # Unsupported category.
+        print("UNKNOWN")
+        correctness = "Unknown"
 
-    ###TODO: right now it doesnt do witness output, have to implement that soon
+    ###TODO: right now it doesnt do invariants
+    witness_output.generate_witness(correctness, input_file_path, prop_file_path, witness_file_path)
 
     pysvf.releasePAG()
 

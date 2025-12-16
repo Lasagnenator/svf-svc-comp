@@ -1,3 +1,6 @@
+"""
+Output a format 2.1 witness.
+"""
 
 import datetime
 import hashlib
@@ -37,7 +40,7 @@ Sample witness
 """
 
 def write_witness(invariants: list, input_files: list, specification: str, output_path: str) -> None:
-    
+
     hashes = {}
     for file in input_files:
         hash = hashlib.sha256()
@@ -47,7 +50,7 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
                 hash.update(block)
                 block = f.read(hash.block_size)
         hashes[file] = hash.hexdigest()
-    
+
     yaml_list = []
     yaml_list.append(dict())
     yaml_list[-1]['entry_type'] = 'invariant_set'
@@ -63,7 +66,7 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
         #'configuration': '(Optional)', The configuration in which the tool ran.
         #'command_line': '(Optional)', The command line with which the tool ran;
         #'description': '(Optional)' Any information not fitting in the previous items.
-        
+
     }
 
     yaml_list[-1]['metadata']['task'] = {
@@ -91,12 +94,12 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
       if invariant['column'] != None:
         yaml_list[-1]['content'][-1]['invariant']['location']['column'] = invariant['column'] # optional
       if invariant['function'] != None:
-        yaml_list[-1]['content'][-1]['invariant']['location']['function'] = invariant['function'] # optional 
- 
+        yaml_list[-1]['content'][-1]['invariant']['location']['function'] = invariant['function'] # optional
+
 
     with open(output_path, 'w') as file:
         yaml.dump(yaml_list, file, default_style=None, sort_keys=False)
-    
+
 # Sample usage
 if __name__ == "__main__":
   invariants = [{
