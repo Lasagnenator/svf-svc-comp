@@ -4,7 +4,6 @@ import pysvf
 import argparse
 import subprocess
 import tempfile
-import traceback
 
 import nondet
 from util import *
