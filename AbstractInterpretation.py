@@ -5,7 +5,7 @@ from typing import List, Dict, Set, Optional
 import pysvf
 import faulthandler
 faulthandler.enable()
-
+from util import *
 import pysvf
 from pysvf import IntervalValue, AddressValue, AbstractValue, AbstractState
 import sys
@@ -942,7 +942,7 @@ class AbstractExecution:
             else:
                 return AddressValue(self.getVirtualMemAddress(var_id))
         except UnknownException:
-            print(f"Unknown exception for objVar {objVar}")
+            fail(f"Unknown exception for objVar {objVar}", 1)
             return IntervalValue.top()
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
@@ -1185,7 +1185,7 @@ class AbstractExecution:
                 result = IntervalValue.top()
             abstract_state[lhs] = AbstractValue(result)
         except UnknownException as e:
-            print(f"UnknownException in updateStateOnBinary: {e}")
+            fail(f"UnknownException in updateStateOnBinary: {e}", 1)
 
     #TODO: your code starts from here
     def updateStateOnLoad(self, load: pysvf.LoadStmt):
