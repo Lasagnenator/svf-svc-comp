@@ -66,7 +66,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         pysvf.buildSVFModule(working_file.name)
         pag = pysvf.getPAG()
     except Exception as e:
-        log(f"pysvf: Failed with {e}. SVF-SVC will fail.")
+        log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
         log_exception(e)
         fail("ERROR(SVF)")
 
@@ -79,7 +79,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         ae.analyse()
         log(ae.results)
     except Exception as e:
-        log(f"AbstractExecution: Failed with {e}. SVF-SVC will not continue.")
+        log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
         fail("ERROR(AE)")
 
@@ -125,7 +125,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
 
     else:
         # Unsupported category.
-        print("UNKNOWN")
+        print("Unknown")
         correctness = "Unknown"
 
     ###TODO: right now it doesnt do invariants
