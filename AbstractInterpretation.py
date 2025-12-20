@@ -941,9 +941,11 @@ class AbstractExecution:
                     return IntervalValue.top()
             else:
                 return AddressValue(self.getVirtualMemAddress(var_id))
-        except UnknownException:
-            fail(f"Unknown exception for objVar {objVar}", 1)
-            return IntervalValue.top()
+        except UnknownException as e:
+            log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
+            log_exception(e)
+            fail("ERROR(SVF)")
+
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
         node = addr.getICFGNode()
@@ -1185,7 +1187,10 @@ class AbstractExecution:
                 result = IntervalValue.top()
             abstract_state[lhs] = AbstractValue(result)
         except UnknownException as e:
-            fail(f"UnknownException in updateStateOnBinary: {e}", 1)
+            log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
+            log_exception(e)
+            fail("ERROR(SVF)")
+
 
     #TODO: your code starts from here
     def updateStateOnLoad(self, load: pysvf.LoadStmt):
