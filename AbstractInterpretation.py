@@ -944,7 +944,7 @@ class AbstractExecution:
         except UnknownException as e:
             log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
             log_exception(e)
-            fail("ERROR(SVF)")
+            fail("Unknown", 0)
 
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
@@ -1189,7 +1189,7 @@ class AbstractExecution:
         except UnknownException as e:
             log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
             log_exception(e)
-            fail("ERROR(SVF)")
+            fail("Unknown", 0)
 
 
     #TODO: your code starts from here
