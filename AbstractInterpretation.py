@@ -11,6 +11,14 @@ from pysvf import IntervalValue, AddressValue, AbstractValue, AbstractState
 import sys
 from pysvf.enums import OpCode, Predicate
 
+class UnknownException(Exception):
+    def __init__(self, msg: str):
+        super().__init__(msg)
+        self.msg = msg 
+
+    def __str__(self) -> str:
+        return self.msg
+
 class WTOCycleDepth:
     def __init__(self):
         self._heads: List[ICFGNode] = []
@@ -910,29 +918,32 @@ class AbstractExecution:
     :rtype: pysvf.AbstractValue
     """
     def initObjVar(self, objVar: pysvf.ObjVar):
-        var_id = objVar.getId()
-        obj = self.svfir.getBaseObject(var_id).asBaseObjVar()
-        if obj.isConstDataObjVar() or obj.isConstantArray() or obj.isConstantStruct():
-            if isinstance(objVar, pysvf.ConstIntObjVar):
-                numeral = objVar.getSExtValue()
-                return IntervalValue(numeral, numeral)
+        try:
+            var_id = objVar.getId()
+            obj = self.svfir.getBaseObject(var_id).asBaseObjVar()
+            if obj.isConstDataObjVar() or obj.isConstantArray() or obj.isConstantStruct():
+                if isinstance(objVar, pysvf.ConstIntObjVar):
+                    numeral = objVar.getSExtValue()
+                    return IntervalValue(numeral, numeral)
 
-            elif isinstance(objVar, pysvf.ConstFPObjVar):
-                return IntervalValue(objVar.getFPValue(), objVar.getFPValue())
+                elif isinstance(objVar, pysvf.ConstFPObjVar):
+                    raise UnknownException("ConstFPObjVar not implemented yet")
 
-            elif isinstance(objVar, pysvf.ConstNullPtrObjVar):
-                return IntervalValue(0,0)
+                elif isinstance(objVar, pysvf.ConstNullPtrObjVar):
+                    return IntervalValue(0,0)
 
-            elif isinstance(objVar, pysvf.GlobalObjVar):
-                return AddressValue(self.getVirtualMemAddress(var_id))
+                elif isinstance(objVar, pysvf.GlobalObjVar):
+                    return AddressValue(self.getVirtualMemAddress(var_id))
 
-            elif obj.isConstantArray() or obj.isConstantStruct():
-                return IntervalValue.top()
+                elif obj.isConstantArray() or obj.isConstantStruct():
+                    return IntervalValue.top()
+                else:
+                    return IntervalValue.top()
             else:
-                return IntervalValue.top()
-        else:
-            return AddressValue(self.getVirtualMemAddress(var_id))
-
+                return AddressValue(self.getVirtualMemAddress(var_id))
+        except UnknownException:
+            print(f"Unknown exception for objVar {objVar}")
+            return IntervalValue.top()
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
         node = addr.getICFGNode()
@@ -1132,46 +1143,49 @@ class AbstractExecution:
     # You are required to handle predicates (The program is assumed to have signed ints and also interger-overflow-free),
     # including Add, FAdd, Sub, FSub, Mul, FMul, SDiv, FDiv, UDiv, SRem, FRem, URem, Xor, And, Or, AShr, Shl, LShr
     def updateStateOnBinary(self, binary: pysvf.BinaryOPStmt):
-        node = binary.getICFGNode()
-        abstract_state = self.post_abs_trace[node]
-        lhs = binary.getResId()
-        op1 = binary.getOpVar(0)
-        op2 = binary.getOpVar(1)
-        assert abstract_state.getVar(op1.getId()).isInterval() and abstract_state.getVar(op2.getId()).isInterval()
-        result = IntervalValue(0)
-        val1 = abstract_state[op1.getId()].getInterval()
-        val2 = abstract_state[op2.getId()].getInterval()
-        assert(isinstance(val1, IntervalValue) and isinstance(val2, IntervalValue))
-        if binary.getOpcode() == OpCode.Add or binary.getOpcode() == OpCode.FAdd:
-            result = val1 + val2
-        elif binary.getOpcode() == OpCode.Sub or binary.getOpcode() == OpCode.FSub:
-            result = val1 - val2
-        elif binary.getOpcode() == OpCode.Mul or binary.getOpcode() == OpCode.FMul:
-            result = val1 * val2
-        elif binary.getOpcode() == OpCode.UDiv or binary.getOpcode() == OpCode.SDiv or binary.getOpcode() == OpCode.FDiv:
-            if int(val2.ub())>=0 and int(val2.lb()) <= 0:
-                result = IntervalValue.top()
-            else:
-                result = val1 / val2
-        elif binary.getOpcode() == OpCode.SRem or binary.getOpcode() == OpCode.FRem or binary.getOpcode() == OpCode.URem:
-            if int(val2.ub())>=0 and int(val2.lb()) <= 0:
-                result = IntervalValue.top()
-            else:
-                result = val1 % val2
-        elif binary.getOpcode() == OpCode.Xor:
-            result = val1 ^ val2
-        elif binary.getOpcode() == OpCode.Or:
-            result = val1 | val2
-        elif binary.getOpcode() == OpCode.And:
-            result = val1 & val2
-        elif binary.getOpcode() == OpCode.Shl:
-            result = val1 << val2
-        elif binary.getOpcode() == OpCode.LShr or binary.getOpcode() == OpCode.AShr:
-            result = val1 >> val2
-        else:
-            result = IntervalValue.top()
-        abstract_state[lhs] = AbstractValue(result)
+        try:
+            node = binary.getICFGNode()
+            abstract_state = self.post_abs_trace[node]
+            lhs = binary.getResId()
+            op1 = binary.getOpVar(0)
+            op2 = binary.getOpVar(1)
 
+            if not abstract_state.getVar(op1.getId()).isInterval() or abstract_state.getVar(op2.getId()).isInterval():
+                raise UnknownException("Operands must be intervals")
+            result = IntervalValue(0)
+            val1 = abstract_state[op1.getId()].getInterval()
+            val2 = abstract_state[op2.getId()].getInterval()
+            if binary.getOpcode() == OpCode.Add or binary.getOpcode() == OpCode.FAdd:
+                result = val1 + val2
+            elif binary.getOpcode() == OpCode.Sub or binary.getOpcode() == OpCode.FSub:
+                result = val1 - val2
+            elif binary.getOpcode() == OpCode.Mul or binary.getOpcode() == OpCode.FMul:
+                result = val1 * val2
+            elif binary.getOpcode() == OpCode.UDiv or binary.getOpcode() == OpCode.SDiv or binary.getOpcode() == OpCode.FDiv:
+                if int(val2.ub())>=0 and int(val2.lb()) <= 0:
+                    result = IntervalValue.top()
+                else:
+                    result = val1 / val2
+            elif binary.getOpcode() == OpCode.SRem or binary.getOpcode() == OpCode.FRem or binary.getOpcode() == OpCode.URem:
+                if int(val2.ub())>=0 and int(val2.lb()) <= 0:
+                    result = IntervalValue.top()
+                else:
+                    result = val1 % val2
+            elif binary.getOpcode() == OpCode.Xor:
+                result = val1 ^ val2
+            elif binary.getOpcode() == OpCode.Or:
+                result = val1 | val2
+            elif binary.getOpcode() == OpCode.And:
+                result = val1 & val2
+            elif binary.getOpcode() == OpCode.Shl:
+                result = val1 << val2
+            elif binary.getOpcode() == OpCode.LShr or binary.getOpcode() == OpCode.AShr:
+                result = val1 >> val2
+            else:
+                result = IntervalValue.top()
+            abstract_state[lhs] = AbstractValue(result)
+        except UnknownException as e:
+            print(f"UnknownException in updateStateOnBinary: {e}")
 
     #TODO: your code starts from here
     def updateStateOnLoad(self, load: pysvf.LoadStmt):
