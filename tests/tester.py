@@ -131,6 +131,9 @@ def compute_results(results, args):
     rows = []
     totals = Counter()
     for output, name in results:
+        if len(output) == 0:
+            # No point adding empty results.
+            continue
         row = [name]
         row_count = Counter()
         for v in output.values():
@@ -180,7 +183,7 @@ if __name__ == "__main__":
 
     original_cwd = os.path.abspath(".")
     os.chdir(args.bench_root)
-    for bench in sorted(glob.glob("c/**/*.yml", recursive=True)):
+    for bench in sorted(glob.glob("c/*/*.yml", recursive=True)):
         if "witness" in bench:
             # Pretty broad hammer to ignore witness files.
             continue
@@ -198,7 +201,10 @@ if __name__ == "__main__":
         if args.verbose > 0:
             print(bench)
         os.chdir(args.bench_root)
-        results.append(run_yaml(bench, args))
+        try:
+            results.append(run_yaml(bench, args))
+        except KeyboardInterrupt:
+            break
         if args.verbose > 1:
             print(results[-1])
 
@@ -209,13 +215,14 @@ if __name__ == "__main__":
 Example command
 
 python3 tester.py /mnt/sv-benchmarks /mnt/svf-svc-comp --reach --output out.csv -v \
---skip xcsp --skip 06_fuzzle_50x50_0-cycle --skip rekcba_ctm --skip rekh_ctm
+--skip xcsp --skip 06_fuzzle_50x50_0-cycle --skip rekcba_ctm --skip rekh_ctm --skip eca-rers
 
 Skip the following:
  xcsp - SVF seems to spam the disk.
  06_fuzzle_50x50_0-cycle - SVF blows up memory.
  rekcba_ctm - SVF hangs.
  rekh_ctm - SVF hangs.
+ eca-rers - very slow but SVF does solve them.
 
 Ctrl+C on any that you want to skip mid-test.
 Double Ctrl+C to quit (0.25s window).
