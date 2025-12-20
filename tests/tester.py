@@ -3,7 +3,7 @@ Run SVF-SVC on all the SV-COMP cases locally.
 
 Note that this doesn't follow the benchexec script or any other
 definitions and will probably break if the names of things are
-changed later. It exists in a "it works on my machine" state.
+changed later.
 
 This script also doesn't check the type of violation returned.
 
@@ -16,6 +16,7 @@ import csv
 from collections import Counter
 from enum import Enum, auto
 import glob
+import resource
 import subprocess
 import sys
 import time
@@ -51,6 +52,15 @@ def interpret_output(stdout) -> VERDICT:
         return VERDICT.UNKNOWN
     return VERDICT.ERROR
 
+def limit_resource():
+    # Set resource limit for the subprocess runnning.
+    # SVC has 15GB limit. We choose 5GB here because it really shouldn't need more.
+    # SVC has 960s limit. We choose 30 because it's a waste of time for this testing.
+    # Only set soft limit because no need to set a hard limit.
+    mem_limit = 5 * 1024 * 1024 * 1024 # 5GB
+    resource.setrlimit(resource.RLIMIT_AS, (mem_limit, resource.RLIM_INFINITY))
+    resource.setrlimit(resource.RLIMIT_CPU, (30, resource.RLIM_INFINITY))
+
 def run_prop(prop_file, definition, args) -> VERDICT:
     if isinstance(definition["input_files"], (list, tuple)) and len(definition["input_files"]) > 1:
         # SVF can only handle one input file.
@@ -61,7 +71,7 @@ def run_prop(prop_file, definition, args) -> VERDICT:
     command = [svf_run, c_file,
         "--prop", prop_file,
         "--witness", "",
-        "--time-limit", "10"
+        "--time-limit", "30"
     ]
 
     if args.verbose > 2:
@@ -74,7 +84,8 @@ def run_prop(prop_file, definition, args) -> VERDICT:
 
     try:
         process = subprocess.run(command, cwd=".",
-            stdout=subprocess.PIPE, stderr=stderr
+            stdout=subprocess.PIPE, stderr=stderr,
+            preexec_fn=limit_resource
         )
 
         return interpret_output(process.stdout)
@@ -87,6 +98,9 @@ def run_yaml(yaml_path: str, args) -> Tuple[dict[str, VERDICT], str]:
     """Returns results and total."""
     with open(yaml_path) as f:
         definition = yaml.safe_load(f)
+        if not isinstance(definition, dict):
+            print(f"Bad yaml file: {yaml_path}")
+            return {}, yaml_path
     os.chdir(os.path.dirname(yaml_path))
 
     output = dict()
@@ -169,6 +183,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--specific", help="use specific benchmark inside bench root", default=None)
     parser.add_argument("--skip", action="append", default=[])
+    parser.add_argument("--skipto", default=None, help="Skip everything and start from this matching benchmark")
 
     parser.add_argument("--output", default=None, help="CSV output")
 
@@ -180,6 +195,7 @@ if __name__ == "__main__":
         print(f"Extra (unused) arguments: {extra}")
 
     results = []
+    finished_skipping = args.skipto is None
 
     original_cwd = os.path.abspath(".")
     os.chdir(args.bench_root)
@@ -187,6 +203,10 @@ if __name__ == "__main__":
         if "witness" in bench:
             # Pretty broad hammer to ignore witness files.
             continue
+        if not finished_skipping and args.skipto not in bench:
+            continue
+        else:
+            finished_skipping = True
         if args.specific is not None and args.specific not in bench:
             # Specific bench specified and doesn't match.
             continue
@@ -215,14 +235,23 @@ if __name__ == "__main__":
 Example command
 
 python3 tester.py /mnt/sv-benchmarks /mnt/svf-svc-comp --reach --output out.csv -v \
---skip xcsp --skip 06_fuzzle_50x50_0-cycle --skip rekcba_ctm --skip rekh_ctm --skip eca-rers
+--skip xcsp --skip 06_fuzzle_50x50_0-cycle --skip rekcba_ctm --skip rekh_ctm \
+--skip eca-rers --skip eca-programs --skip ridecore --skip btor2c-lazyMod.pj_icram \
+--skipto ldv-linux-3.12-rc1
 
 Skip the following:
  xcsp - SVF seems to spam the disk.
  06_fuzzle_50x50_0-cycle - SVF blows up memory.
  rekcba_ctm - SVF hangs.
  rekh_ctm - SVF hangs.
- eca-rers - very slow but SVF does solve them.
+ eca-rers - very slow.
+ eca-programs - very slow.
+ ridecore - hardware verification. Too much memory.
+ btor2c-lazyMod.pj_icram - too much memory.
+
+Running a specific test with verbose logging
+python3 tester.py /mnt/sv-benchmarks /mnt/svf-svc-comp --reach --output out.csv
+--specific array-crafted/bAnd1 -vvv
 
 Ctrl+C on any that you want to skip mid-test.
 Double Ctrl+C to quit (0.25s window).
