@@ -942,7 +942,7 @@ class AbstractExecution:
             else:
                 return AddressValue(self.getVirtualMemAddress(var_id))
         except UnknownException as e:
-            log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
             log_exception(e)
             fail("Unknown", 0)
 
@@ -1187,7 +1187,7 @@ class AbstractExecution:
                 result = IntervalValue.top()
             abstract_state[lhs] = AbstractValue(result)
         except UnknownException as e:
-            log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
             log_exception(e)
             fail("Unknown", 0)
 
