@@ -53,13 +53,13 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
 
     log(f"Running clang with command: {' '.join(command)}")
     retcode = subprocess.run(command).returncode
+    buffer.close()
     log(f"Clang exitted with code {retcode}.")
 
     if retcode != 0:
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
+        working_file.close()
         fail("ERROR(CLANG)", retcode)
-
-    buffer.close()
 
     try:
         # This code is copied from python/test-ae.py to use SVF
@@ -68,6 +68,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     except Exception as e:
         log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
         log_exception(e)
+        working_file.close()
         fail("ERROR(SVF)")
 
     # parse input prop file path to find the file name
@@ -81,6 +82,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
+        working_file.close()
         fail("ERROR(AE)")
 
     if prop_file_name == 'unreach-call.prp':
@@ -131,6 +133,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     ###TODO: right now it doesnt do invariants
     witness_output.generate_witness(correctness, input_file_path, prop_file_path, witness_file_path)
 
+    working_file.close()
     pysvf.releasePAG()
 
 
