@@ -1,0 +1,13 @@
+.git/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+test-results/
+working.ll
+witness.graphml
+witness.yml
+
+tests/out*.csv
+tests/log.txt
