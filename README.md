@@ -1,20 +1,28 @@
 
+## Local setup
+
+Install the pinned Python dependencies into a virtual environment:
+
+```sh
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
 ## Dockerfile usage
 Attached is a dockerfile that when built into an image, provides an environment in which SVF can be built and run for the competition.
 
 Instructions for using the dockerfile (assuming that this repository has been cloned to a local machine with macOS/WSL), starting with the current directory as svf-svc-comp:
-```
-$ docker build -t svf-comp:01 .
-$ docker run -itd svf-comp:01
+```sh
+docker build -t svf-comp:01 .
+docker run -itd svf-comp:01
 ```
 
 Now, it should be possible to access and work within the container environment using VSCode similar to how it could be done for COMP6131. (Pulling from the repo is easy, but pushing changes to the repo requires setting up the container to allow for SSHing (will set up later, soz)).
 
-One thing to mention is that you should run the command `git checkout setup-tooling` to enter this branch to access these changes, since it's currently not on main/master (replace setup-tooling with the branch you're trying to test/work in if needed).
-
 The current entrypoint is `svf_run.py`. From the repository root, run:
-```
-$ python3 svf_run.py --prop prop_file_path c_source_file_path
+```sh
+python3 svf_run.py --prop prop_file_path c_source_file_path
 ```
 
 To explain what happens in the codebase, similar to what we did in assignment 3:
@@ -39,7 +47,6 @@ Use the already-present SV-COMP corpus; the runner never clones or downloads it.
 repository venv first so both the runner and `svf_run.py` use the preinstalled dependencies:
 
 ```sh
-source venv/bin/activate
 python tests/tester.py "$(realpath ../sv-benchmarks-main-c)" "$PWD" \
   --reach --sample 1% --seed 0
 ```

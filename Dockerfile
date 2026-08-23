@@ -27,9 +27,8 @@ RUN apt-get update
 RUN set -ex; \
     apt-get update && apt-get install -y python3.10-dev python3-pip \
             && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1;
-RUN python3 -m pip install pysvf
-RUN python3 -m pip install z3-solver
-RUN python3 -m pip install pyyaml
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Fetch and build SVF source.
 RUN echo "Downloading LLVM and building SVF to " ${HOME}
