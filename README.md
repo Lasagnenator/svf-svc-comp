@@ -1,12 +1,19 @@
 
 ## Local setup
 
-Install the pinned Python dependencies into a virtual environment:
+Ensure you have `clang` and `python` installed. SVF-SVC expects `clang-21` and `python-3.12`. Other versions may work but are unsupported.
+
+Install the dependencies into a virtual environment:
 
 ```sh
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt
+```
+
+You can build a self-contained competition archive using the build script. The output is `dist/svf-svc.zip` and is suitable to upload.
+```sh
+./build.sh
 ```
 
 ## Dockerfile usage

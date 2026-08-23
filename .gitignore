@@ -12,3 +12,4 @@ pysvf
 yaml
 z3
 test-results/
+dist/
