@@ -31,8 +31,8 @@ PROPERTY_NAMES = {
     "valid-memsafety.prp": "safety",
     "valid-memcleanup.prp": "cleanup",
 }
-SUPPORTED_PROPERTIES = {"reach"}
-RESULT_RE = re.compile(r"^(?:REACH|OVERFLOW) (Correct|Incorrect)$")
+SUPPORTED_PROPERTIES = {"reach", "safety", "cleanup"}
+RESULT_RE = re.compile(r"^(?:REACH|MEMORY|CLEANUP|OVERFLOW) (Correct|Incorrect)$")
 ERROR_RE = re.compile(r"^ERROR(?:\([^)]+\))?$")
 SCORE = {
     (True, "true"): 2,
@@ -52,6 +52,7 @@ class Task:
     property_name: str
     expected: bool
     data_model: str
+    subproperty: str | None = None
 
     @property
     def stratum(self):
@@ -67,6 +68,7 @@ class Result:
     property_file: str
     expected: bool
     data_model: str
+    subproperty: str | None
     answer: str
     classification: str
     score: int
@@ -137,7 +139,7 @@ def load_tasks(yaml_path, corpus_root, enabled):
         identity = f"{relative}\0{index}\0{property_file}"
         run_id = hashlib.sha256(identity.encode()).hexdigest()[:16]
         tasks.append(Task(run_id, yaml_path, relative, inputs, property_file,
-                          property_name, expected, str(data_model)))
+                          property_name, expected, str(data_model), prop.get("subproperty")))
     return tasks
 
 
@@ -249,10 +251,9 @@ def unsupported_reason(task):
     if task.property_name not in SUPPORTED_PROPERTIES:
         return ("UNSUPPORTED_PROPERTY",
                 f"svf_run.py does not implement the {task.property_name} property")
-    if task.data_model == "ILP32":
-        return ("UNSUPPORTED_DATA_MODEL",
-                "svf_run.py parses --bits 32 but currently compiles for the host LP64 model")
-    if task.data_model not in {"LP64", "unknown"}:
+    if task.property_name in {"safety", "cleanup"} and task.data_model == "unknown":
+        return ("UNSUPPORTED_DATA_MODEL", "memory properties require an ILP32 or LP64 data model")
+    if task.data_model not in {"ILP32", "LP64", "unknown"}:
         return ("UNSUPPORTED_DATA_MODEL", f"unsupported data model: {task.data_model}")
     if len(task.input_files) != 1:
         return ("MULTIPLE_INPUTS",
@@ -285,7 +286,8 @@ def run_task(task, args, logs_dir):
         return Result(
             run_id=task.run_id, task_file=task.yaml_relative, input_files=input_paths,
             property=task.property_name, property_file=property_path,
-            expected=task.expected, data_model=task.data_model, answer="unknown",
+            expected=task.expected, data_model=task.data_model,
+            subproperty=task.subproperty, answer="unknown",
             classification="unsupported", score=0, return_code=None,
             termination_reason="unsupported", signal=None, wall_seconds=0.0,
             error_code=error_code, error_message=message,
@@ -332,7 +334,8 @@ def run_task(task, args, logs_dir):
     return Result(
         run_id=task.run_id, task_file=task.yaml_relative, input_files=input_paths,
         property=task.property_name, property_file=property_path,
-        expected=task.expected, data_model=task.data_model, answer=answer,
+        expected=task.expected, data_model=task.data_model,
+        subproperty=task.subproperty, answer=answer,
         classification=classification, score=score, return_code=return_code,
         termination_reason=termination_reason, signal=signal_name,
         wall_seconds=wall_seconds, error_code=error_code,
@@ -379,8 +382,8 @@ def build_parser():
     parser.add_argument("bench_root", type=Path, help="existing benchmark root containing c/")
     parser.add_argument("svf_root", type=Path, help="svf-svc repository root")
     parser.add_argument("--reach", action="store_true", help="test unreach-call properties")
-    parser.add_argument("--safety", action="store_true", help="test memory-safety properties")
-    parser.add_argument("--cleanup", action="store_true", help="test memory-cleanup properties")
+    parser.add_argument("--safety", action="store_true", help="test valid-memsafety properties")
+    parser.add_argument("--cleanup", action="store_true", help="test valid-memcleanup properties")
     parser.add_argument("--overflow", action="store_true", help="test no-overflow properties")
     parser.add_argument("--specific", help="only task paths containing this text")
     parser.add_argument("--skip", action="append", default=[], help="skip task paths containing this text")
