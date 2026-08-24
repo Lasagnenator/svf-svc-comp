@@ -9,7 +9,7 @@ ENV APP_DIR=${HOME}/svf-svc-comp
 RUN useradd --create-home --uid 10001 --shell /bin/bash svf
 
 # Define dependencies.
-ENV lib_deps="cmake g++ gcc git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="cmake g++ gcc clang git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 
 # Fetch dependencies.
