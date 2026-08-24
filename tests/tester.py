@@ -95,6 +95,16 @@ def parse_sample(value):
     return percent
 
 
+def parse_sample_count(value):
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("sample count must be a positive integer") from error
+    if count <= 0:
+        raise argparse.ArgumentTypeError("sample count must be a positive integer")
+    return count
+
+
 def canonical_property(path):
     return PROPERTY_NAMES.get(Path(path).name)
 
@@ -167,27 +177,54 @@ def stable_rank(task, seed):
     return hashlib.sha256(f"{seed}\0{task.run_id}".encode()).digest()
 
 
-def sample_tasks(tasks, percent, seed):
-    if percent is None or percent == 100 or not tasks:
+def sample_tasks(tasks, percent, seed, count=None):
+    if not tasks:
+        return []
+    if count is not None:
+        if count > len(tasks):
+            raise ValueError(f"sample count {count} exceeds population {len(tasks)}")
+        wanted = count
+    elif percent is None or percent == 100:
         return sorted(tasks, key=lambda task: task.run_id)
-    wanted = max(1, math.ceil(len(tasks) * percent / 100))
-    strata = {}
+    else:
+        wanted = max(1, math.ceil(len(tasks) * percent / 100))
+
+    properties = {}
     for task in tasks:
+        properties.setdefault(task.property_name, []).append(task)
+    property_order = sorted(
+        properties,
+        key=lambda name: hashlib.sha256(f"{seed}\0property\0{name}".encode()).digest(),
+    )
+
+    selected = []
+    for property_name in property_order[:min(wanted, len(property_order))]:
+        selected.append(min(
+            properties[property_name],
+            key=lambda task: stable_rank(task, seed),
+        ))
+    if len(selected) == wanted:
+        return sorted(selected, key=lambda task: stable_rank(task, seed))
+
+    selected_ids = {task.run_id for task in selected}
+    remaining_tasks = [task for task in tasks if task.run_id not in selected_ids]
+    remaining_wanted = wanted - len(selected)
+    strata = {}
+    for task in remaining_tasks:
         strata.setdefault(task.stratum, []).append(task)
 
     quotas = []
     assigned = 0
     for key, members in strata.items():
-        exact = wanted * len(members) / len(tasks)
+        exact = remaining_wanted * len(members) / len(remaining_tasks)
         base = math.floor(exact)
         tie_breaker = hashlib.sha256(f"{seed}\0{key}".encode()).digest()
         quotas.append([key, base, exact - base, tie_breaker])
         assigned += base
     quotas.sort(key=lambda item: (-item[2], item[3]))
-    for index in range(wanted - assigned):
+    for index in range(remaining_wanted - assigned):
         quotas[index][1] += 1
 
-    selected = []
     for key, count, _, _ in quotas:
         ranked = sorted(strata[key], key=lambda task: stable_rank(task, seed))
         selected.extend(ranked[:count])
@@ -387,7 +424,11 @@ def build_parser():
     parser.add_argument("--overflow", action="store_true", help="test no-overflow properties")
     parser.add_argument("--specific", help="only task paths containing this text")
     parser.add_argument("--skip", action="append", default=[], help="skip task paths containing this text")
-    parser.add_argument("--sample", type=parse_sample, help="deterministic percentage, e.g. 1%%")
+    sample_group = parser.add_mutually_exclusive_group()
+    sample_group.add_argument("--sample", type=parse_sample,
+                              help="deterministic percentage, e.g. 1%%")
+    sample_group.add_argument("--sample-count", type=parse_sample_count,
+                              help="deterministic exact number of property runs")
     parser.add_argument("--seed", default="0", help="sampling seed (default: 0)")
     parser.add_argument("--dry-run", action="store_true", help="select tasks without running svf-svc")
     parser.add_argument("--profile", choices=("quick", "competition"), default="quick",
@@ -425,7 +466,10 @@ def main(argv=None):
     tasks, discovery_errors = discover_tasks(args)
     if not tasks:
         build_parser().error("no benchmark-property runs matched the requested filters")
-    selected = sample_tasks(tasks, args.sample, args.seed)
+    try:
+        selected = sample_tasks(tasks, args.sample, args.seed, args.sample_count)
+    except ValueError as error:
+        build_parser().error(str(error))
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     results_dir = (args.results_dir or args.svf_root / "test-results" / timestamp).resolve()
     if results_dir.exists() and any(results_dir.iterdir()):
@@ -437,6 +481,7 @@ def main(argv=None):
         "corpus": str(args.bench_root),
         "tool": str(args.svf_root / "svf_run.py"),
         "sample_percent": args.sample,
+        "sample_count": args.sample_count,
         "seed": args.seed,
         "profile": args.profile,
         "limits": {
@@ -448,6 +493,10 @@ def main(argv=None):
         "population": len(tasks),
         "score_eligible_population": sum(score_eligible(task) for task in tasks),
         "score_eligible_selected": sum(score_eligible(task) for task in selected),
+        "selected_by_property": {
+            property_name: sum(task.property_name == property_name for task in selected)
+            for property_name in sorted({task.property_name for task in selected})
+        },
         "selected": [asdict(task) | {"yaml_path": str(task.yaml_path)} for task in selected],
         "discovery_errors": [{"task_file": path, "error": error} for path, error in discovery_errors],
     }
