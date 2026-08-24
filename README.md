@@ -1,7 +1,7 @@
 
 ## Local setup
 
-Ensure you have `clang` and `python` installed. SVF-SVC expects `clang-21` and `python-3.12`. Other versions may work but are unsupported.
+Ensure you have `clang` and `python` installed. SVF-SVC expects `clang-21` and `python-3.12`. Other versions may work but are unsupported. To run tests, you will need to also install `pyyaml`.
 
 Install the dependencies into a virtual environment:
 
