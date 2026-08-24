@@ -16,6 +16,9 @@ runtime_files=(
     LICENSE.TXT
     requirements.txt
     smoketest.sh
+    tests/basic_reach.c
+    tests/cfl_test2.c
+    tests/unreach-call.prp
 )
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
@@ -23,6 +26,7 @@ python_version="3.12"
 
 rm -rf "$package" "$archive"
 mkdir -p "$package"
+mkdir -p "$package/tests"
 
 python3 -m pip install \
     --disable-pip-version-check \
