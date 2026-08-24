@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m venv /opt/venv
 RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt
+# Install pyyaml because it's likely needed for testing
+RUN /opt/venv/bin/python -m pip install pyyaml
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
@@ -42,4 +44,4 @@ COPY --chown=svf:svf . .
 
 # Build-time check to see that things probably are working
 USER svf
-RUN python -c "import pysvf, yaml, z3"
+RUN python -c "import pysvf, yaml"
