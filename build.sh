@@ -15,6 +15,7 @@ runtime_files=(
     witness_output.py
     LICENSE.TXT
     requirements.txt
+    smoketest.sh
 )
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
@@ -35,6 +36,7 @@ for file in "${runtime_files[@]}"; do
     cp "$root/$file" "$package/$file"
 done
 chmod 755 "$package/svf_run.py"
+chmod 755 "$package/smoketest.sh"
 
 # Fix SABER's import
 pysvf_root="$package/pysvf/SVF"
