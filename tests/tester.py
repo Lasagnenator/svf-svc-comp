@@ -3,12 +3,19 @@
 
 This is a lightweight local progress runner, not a replacement for BenchExec or
 witness validation. It deliberately never downloads benchmarks.
+
+Example usage from the svf-svc repository root:
+    python tests/tester.py /mnt/sv-benchmarks "$PWD" \
+        --reach --set Arrays --sample-count 10 --seed 0
+    python tests/tester.py /mnt/sv-benchmarks "$PWD" \
+        --reach --safety --cleanup --sample-count 100 --dry-run
 """
 
 import argparse
 import csv
 from dataclasses import asdict, dataclass
 import datetime
+import glob
 import hashlib
 import json
 import math
@@ -117,6 +124,87 @@ def normalize_inputs(value):
     raise ValueError("input_files must be a path or a list of paths")
 
 
+def resolve_set_files(corpus_root, selectors):
+    set_root = (corpus_root / "c").resolve()
+    resolved = set()
+    for selector in selectors:
+        pattern = selector if selector.endswith(".set") else f"{selector}.set"
+        if any(character in pattern for character in "*?["):
+            matches = [Path(path) for path in glob.glob(str(set_root / pattern))]
+        else:
+            matches = [set_root / pattern]
+        valid = []
+        for path in matches:
+            path = path.resolve()
+            try:
+                path.relative_to(set_root)
+            except ValueError:
+                continue
+            if path.is_file() and path.suffix == ".set":
+                valid.append(path)
+        if not valid:
+            raise ValueError(f"set selector matches no .set files: {selector}")
+        resolved.update(valid)
+    return sorted(resolved, key=lambda path: path.relative_to(corpus_root).as_posix())
+
+
+def expand_set_files(corpus_root, set_files):
+    set_root = (corpus_root / "c").resolve()
+    memberships = {}
+    metadata = []
+    raw_match_count = 0
+
+    for set_path in set_files:
+        if set_path.name in {"CorrectnessWitnesses.set", "ViolationWitnesses.set"}:
+            raise ValueError(
+                f"witness-validation set is not supported by svf_run.py: {set_path.name}"
+            )
+        entries = 0
+        set_matches = set()
+        try:
+            lines = set_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"cannot read set file {set_path}: {error}") from error
+        for line_number, raw_line in enumerate(lines, 1):
+            pattern = raw_line.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            entries += 1
+            pattern_path = Path(pattern)
+            if pattern_path.is_absolute() or ".." in pattern_path.parts or pattern.endswith(".set"):
+                raise ValueError(f"{set_path}:{line_number}: invalid set entry: {pattern}")
+            matches = sorted(Path(path).resolve() for path in glob.glob(str(set_path.parent / pattern)))
+            if not matches:
+                raise ValueError(f"{set_path}:{line_number}: pattern matches nothing: {pattern}")
+            for path in matches:
+                try:
+                    path.relative_to(set_root)
+                except ValueError as error:
+                    raise ValueError(
+                        f"{set_path}:{line_number}: match escapes corpus c/: {path}"
+                    ) from error
+                if not path.is_file() or path.suffix != ".yml":
+                    raise ValueError(f"{set_path}:{line_number}: match is not a YAML task: {path}")
+                raw_match_count += 1
+                set_matches.add(path)
+                memberships.setdefault(path, set()).add(set_path.name)
+        if not entries or not set_matches:
+            raise ValueError(f"set file selects no YAML tasks: {set_path}")
+        metadata.append({
+            "path": set_path.relative_to(corpus_root).as_posix(),
+            "sha256": hashlib.sha256(set_path.read_bytes()).hexdigest(),
+            "entry_count": entries,
+            "matched_yaml_count": len(set_matches),
+        })
+
+    yaml_paths = sorted(memberships, key=lambda path: path.relative_to(corpus_root).as_posix())
+    return yaml_paths, metadata, {
+        "raw_match_count": raw_match_count,
+        "unique_yaml_count": len(yaml_paths),
+        "duplicate_count": raw_match_count - len(yaml_paths),
+    }
+
+
 def load_tasks(yaml_path, corpus_root, enabled):
     relative = yaml_path.relative_to(corpus_root).as_posix()
     try:
@@ -153,12 +241,13 @@ def load_tasks(yaml_path, corpus_root, enabled):
     return tasks
 
 
-def discover_tasks(args):
+def discover_tasks(args, yaml_paths=None):
     corpus_root = args.bench_root
     enabled = {name for name in PROPERTY_NAMES.values() if getattr(args, name)}
     tasks = []
     discovery_errors = []
-    for yaml_path in sorted((corpus_root / "c").rglob("*.yml")):
+    candidates = yaml_paths if yaml_paths is not None else sorted((corpus_root / "c").rglob("*.yml"))
+    for yaml_path in candidates:
         relative = yaml_path.relative_to(corpus_root).as_posix()
         if "witness" in relative:
             continue
@@ -424,6 +513,8 @@ def build_parser():
     parser.add_argument("--overflow", action="store_true", help="test no-overflow properties")
     parser.add_argument("--specific", help="only task paths containing this text")
     parser.add_argument("--skip", action="append", default=[], help="skip task paths containing this text")
+    parser.add_argument("--set", dest="sets", action="append", default=[], metavar="SET",
+                        help="restrict discovery to an SV-COMP .set file; repeat to union sets")
     sample_group = parser.add_mutually_exclusive_group()
     sample_group.add_argument("--sample", type=parse_sample,
                               help="deterministic percentage, e.g. 1%%")
@@ -463,7 +554,17 @@ def main(argv=None):
     if min(args.cpu_limit, args.wall_limit, args.memory_limit_mib) <= 0:
         build_parser().error("resource limits must be positive")
 
-    tasks, discovery_errors = discover_tasks(args)
+    try:
+        set_files = resolve_set_files(args.bench_root, args.sets)
+        if set_files:
+            yaml_paths, set_metadata, set_counts = expand_set_files(args.bench_root, set_files)
+        else:
+            yaml_paths, set_metadata = None, []
+            set_counts = {"raw_match_count": 0, "unique_yaml_count": 0, "duplicate_count": 0}
+    except ValueError as error:
+        build_parser().error(str(error))
+
+    tasks, discovery_errors = discover_tasks(args, yaml_paths)
     if not tasks:
         build_parser().error("no benchmark-property runs matched the requested filters")
     try:
@@ -480,6 +581,11 @@ def main(argv=None):
         "schema_version": 1,
         "corpus": str(args.bench_root),
         "tool": str(args.svf_root / "svf_run.py"),
+        "set_selectors": args.sets,
+        "set_files": set_metadata,
+        "set_yaml_count_before_deduplication": set_counts["raw_match_count"],
+        "set_yaml_count": set_counts["unique_yaml_count"],
+        "set_duplicate_count": set_counts["duplicate_count"],
         "sample_percent": args.sample,
         "sample_count": args.sample_count,
         "seed": args.seed,
