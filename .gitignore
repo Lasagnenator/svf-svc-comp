@@ -1,15 +1,6 @@
 __pycache__
-tests
-!tests/
 tests/*
-!tests/test_tester.py
-working.ll
-svf
-witness.yml
-witness.graphml
+!tests/tester.py
 venv
-pysvf
-yaml
-z3
 test-results/
 dist/
