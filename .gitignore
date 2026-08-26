@@ -1,6 +1,7 @@
 __pycache__
 tests/*
 !tests/tester.py
+!tests/test_tester.py
 venv
 test-results/
 dist/
