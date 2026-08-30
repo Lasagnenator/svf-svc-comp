@@ -2,52 +2,46 @@ FROM ubuntu:24.04
 
 # Stop ubuntu-20 interactive options.
 ENV DEBIAN_FRONTEND noninteractive
-ARG TARGETPLATFORM
 
-# Stop script if any individual command fails.
-RUN set -e
-
-# Define LLVM version.
-ENV llvm_version=16.0.0
-
-# Define home directory
-ENV HOME=/home/SVF-tools
+# Define home
+ENV HOME=/home/svf
+ENV APP_DIR=${HOME}/svf-svc-comp
+RUN useradd --create-home --uid 10001 --shell /bin/bash svf
 
 # Define dependencies.
-ENV lib_deps="cmake g++ gcc git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="cmake g++ gcc clang git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 
 # Fetch dependencies.
 RUN apt-get update --fix-missing
-RUN apt-get install -y $build_deps $lib_deps
+RUN apt-get install -y --no-install-recommends $build_deps $lib_deps
 
-# Add deadsnakes PPA for multiple Python versions 
-RUN add-apt-repository ppa:deadsnakes/ppa
-RUN apt-get update
-RUN set -ex; \
-    apt-get update && apt-get install -y python3.10-dev python3-pip \
-            && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1;
-RUN python3 -m pip install pysvf -i https://test.pypi.org/simple/
-RUN python3 -m pip install z3-solver
-RUN python3 -m pip install pyyaml
+# Install Python and set up venv
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
+    python3-venv \
+    libxml2
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m venv /opt/venv
+RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt
+# Install pyyaml because it's likely needed for testing
+RUN /opt/venv/bin/python -m pip install pyyaml
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
 
-# Fetch and build SVF source.
-RUN echo "Downloading LLVM and building SVF to " ${HOME}
-WORKDIR ${HOME}
-RUN git clone "https://github.com/SVF-tools/SVF.git"
-WORKDIR ${HOME}/SVF
-RUN echo "Building SVF ..."
-RUN bash ./build.sh debug
+# Fix SABER's missing import
+ENV PYSVF_ROOT=/opt/venv/lib/python3.12/site-packages/pysvf/SVF
+RUN ln -sfn \
+    "${PYSVF_ROOT}/llvm-21.1.0.obj/lib/libLLVM.so" \
+    "${PYSVF_ROOT}/Release-build/lib/libLLVM.so.21.1"
 
-# Export SVF, llvm, z3 paths
-ENV PATH=${HOME}/SVF/Release-build/bin:$PATH
-ENV PATH=${HOME}/SVF/llvm-$llvm_version.obj/bin:$PATH
-ENV SVF_DIR=${HOME}/SVF
-ENV LLVM_DIR=${HOME}/SVF/llvm-$llvm_version.obj
-ENV Z3_DIR=${HOME}/SVF/z3.obj
-RUN ln -s ${Z3_DIR}/bin/libz3.so ${Z3_DIR}/bin/libz3.so.4
+# Fetch and build this repository
+WORKDIR ${APP_DIR}
+COPY --chown=svf:svf . .
+# No build step required currently.
 
-# Fetch and build Software-Security-Analysis
-WORKDIR ${HOME}
-RUN git clone "https://github.com/Lasagnenator/svf-svc-comp.git"
-WORKDIR ${HOME}/svf-svc-comp
+# Build-time check to see that things probably are working
+USER svf
+RUN python -c "import pysvf, yaml"
