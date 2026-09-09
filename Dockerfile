@@ -1,7 +1,32 @@
 FROM ubuntu:24.04
 
 # Stop ubuntu-20 interactive options.
-ENV DEBIAN_FRONTEND noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install SSH server
+RUN apt-get update && apt-get install -y openssh-server
+RUN mkdir /var/run/sshd
+
+# Make .ssh directory in root, no one else but root has full access
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
+# Copy team public key file into root's authorised keys
+COPY authorized_keys /root/.ssh/authorized_keys
+
+# No one else but root has read and write access to authorized keys
+RUN chmod 600 /root/.ssh/authorized_keys
+
+# Allow root login with key only
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+
+# Disable password authentication
+RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+# Container will listen on port 22
+EXPOSE 22
+
+# Run SSH when container starts
+CMD ["/usr/sbin/sshd", "-D"]
 
 # Define home
 ENV HOME=/home/svf
@@ -45,3 +70,4 @@ COPY --chown=svf:svf . .
 # Build-time check to see that things probably are working
 USER svf
 RUN python -c "import pysvf, yaml"
+USER root

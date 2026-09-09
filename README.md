@@ -19,13 +19,27 @@ You can build a self-contained competition archive using the build script. The o
 ## Dockerfile usage
 Attached is a dockerfile that when built into an image, provides an environment in which SVF can be built and run for the competition.
 
-Instructions for using the dockerfile (assuming that this repository has been cloned to a local machine with macOS/WSL), starting with the current directory as svf-svc-comp:
+Dockerfile now has SSH. For using the Dockerfile with SSH, (assuming local machine operates on macOS/WSL), start with current directory as svf-svc-comp and refer to instructions below:
+
+Generate your own SSH key:
 ```sh
-docker build -t svf-comp:01 .
-docker run -itd svf-comp:01
+ssh-keygen -t ed25519 -C "your.email@example.com"
 ```
 
-Now, it should be possible to access and work within the container environment using VSCode similar to how it could be done for COMP6131. (Pulling from the repo is easy, but pushing changes to the repo requires setting up the container to allow for SSHing (will set up later, soz)).
+Copy your public SSH key to a file called "authorized_keys". This file will keep a list of public keys:
+```sh
+cat ~/.ssh/id_ed25519.pub > authorized_keys
+```
+Build the docker image and run the container as so:
+```sh
+docker build -t svf-comp:01 .
+docker run -itd -p 2222:22 --name svf-comp svf-comp:01
+```
+Then connect via SSH:
+```sh
+ssh root@localhost -p 2222
+```
+
 
 The current entrypoint is `svf_run.py`. From the repository root, run:
 ```sh
