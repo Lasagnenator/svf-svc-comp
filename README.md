@@ -34,7 +34,7 @@ cat ~/.ssh/id_ed25519.pub > authorized_keys
 Build the docker image and run the container as so:
 ```sh
 docker build -t svf-comp:01 .
-docker run -itd -p 2222:22 --name svf-comp svf-comp:01
+docker run -itd -p 2222:22 --name svf-comp -v $(pwd):/home/svf/svf-svc-comp svf-comp:01
 ```
 Then connect via SSH:
 ```sh
