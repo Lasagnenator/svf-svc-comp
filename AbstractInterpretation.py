@@ -212,7 +212,7 @@ class AbstractExecutionHelper:
     managing GEP object offsets, and other utilities.
     """
 
-    def __init__(self, svfir: pysvf.SVFIR):
+    def __init__(self, svfir: pysvf.SVFIR, ae_manager):
         """
         Initialize member variables.
         """
@@ -224,6 +224,7 @@ class AbstractExecutionHelper:
         # Map to store exception information for each ICFGNode
         self.node_to_bug_info = {}
         self.svfir = svfir
+        self.ae_manager = ae_manager
 
     def reportBufOverflow(self, node, msg):
         """
@@ -269,7 +270,8 @@ class AbstractExecutionHelper:
                         raise AssertionError("gepRhsObjVar has no gepObjOffsetFromBase")
 
 
-    def handleMemcpy(self, abstractState: pysvf.AbstractState, dst: pysvf.SVFVar, src: pysvf.SVFVar, len: pysvf.IntervalValue, start_idx: int):
+    def handleMemcpy(self, abstractState: pysvf.AbstractState, dst: pysvf.SVFVar,
+                     src: pysvf.SVFVar, len: pysvf.IntervalValue, start_idx: int, node):
         """
         Handle a memcpy operation in the abstract state.
         """
@@ -280,7 +282,7 @@ class AbstractExecutionHelper:
             if dst.getType().isArrayTy():
                 elemSize = dst.getType().getTypeOfElement().getByteSize()
             elif dst.getType().isPointerTy():
-                elemType = abstractState.getPointeeElement(dstId)
+                elemType = self.ae_manager.getPointeeElement(dst, node)
                 if elemType.isArrayTy():
                     elemSize = elemType.getTypeOfElement().getByteSize()
                 else:
@@ -290,9 +292,10 @@ class AbstractExecutionHelper:
         size = len.lb().getNumeral()
         range_val = size/elemSize
         if abstractState.inVarToAddrsTable(dstId) and abstractState.inVarToAddrsTable(srcId):
+            self.ae_manager.updateAbsState(node, abstractState)
             for index in range(0, int(range_val)):
-                expr_src = abstractState.getGepObjAddrs(srcId, pysvf.IntervalValue(index))
-                expr_dst = abstractState.getGepObjAddrs(dstId, pysvf.IntervalValue(index + start_idx))
+                expr_src = self.ae_manager.getGepObjAddrs(src, pysvf.IntervalValue(index))
+                expr_dst = self.ae_manager.getGepObjAddrs(dst, pysvf.IntervalValue(index + start_idx))
                 for addr_src in expr_src:
                     for addr_dst in expr_dst:
                         objId = abstractState.getIDFromAddr(addr_src)
@@ -301,7 +304,7 @@ class AbstractExecutionHelper:
                             abstractState.store(addr_dst, lhs)
 
 
-    def getStrlen(self, abstractState, strValue):
+    def getStrlen(self, abstractState, strValue, node):
         """
         Calculate the length of a string in the abstract state.
 
@@ -323,15 +326,16 @@ class AbstractExecutionHelper:
                 icfg_node = base_object.getICFGNode()
                 for stmt in icfg_node.getSVFStmts():
                     if isinstance(stmt, pysvf.AddrStmt):
-                        dst_size = abstractState.getAllocaInstByteSize(stmt)
+                        dst_size = self.ae_manager.getAllocaInstByteSize(stmt)
 
         length = 0
         elem_size = 1
 
         # Calculate the string length
         if abstractState.getVar(value_id).isAddr():
+            self.ae_manager.updateAbsState(node, abstractState)
             for index in range(dst_size):
-                expr0 = abstractState.getGepObjAddrs(value_id, pysvf.IntervalValue(index))
+                expr0 = self.ae_manager.getGepObjAddrs(strValue, pysvf.IntervalValue(index))
                 val = pysvf.AbstractValue()
 
                 for addr in expr0:
@@ -346,7 +350,7 @@ class AbstractExecutionHelper:
             if strValue.getType().isArrayTy():
                 elem_size = strValue.getType().getTypeOfElement().getByteSize()
             elif strValue.getType().isPointerTy():
-                elem_type = abstractState.getPointeeElement(value_id)
+                elem_type = self.ae_manager.getPointeeElement(strValue, node)
                 if elem_type:
                     if elem_type.isArrayTy():
                         elem_size = elem_type.getTypeOfElement().getByteSize()
@@ -404,7 +408,8 @@ class AbstractExecution:
         self.recursive_funs = set()
         self.pre_abs_trace = {}
         self.post_abs_trace = {}
-        self.buf_overflow_helper = AbstractExecutionHelper(self.svfir)
+        self.ae_manager = pysvf.AbstractInterpretation.getAEInstance()
+        self.buf_overflow_helper = AbstractExecutionHelper(self.svfir, self.ae_manager)
         self.assert_points = set()
         self.widen_delay = 3
         self.addressMask = 0x7f000000
@@ -784,15 +789,13 @@ class AbstractExecution:
 
     def isBranchFeasible(self, intraEdge: pysvf.IntraCFGEdge, abstractState:  pysvf.AbstractState) -> bool :
         cmp_var = intraEdge.getCondition()
-        cmp_in_edges = cmp_var.getInEdges()
-        if len(cmp_in_edges) == 0:
-            return pysvf.AbstractState.isSwitchBranchFeasible(self.svfir, cmp_var, intraEdge.getSuccessorCondValue(), abstractState)
-        else:
-            cmp = cmp_in_edges[0]
-            if isinstance(cmp, pysvf.CmpStmt):
-                return pysvf.AbstractState.isCmpBranchFeasible(self.svfir, cmp, intraEdge.getSuccessorCondValue(), abstractState)
-            else:
-                return pysvf.AbstractState.isSwitchBranchFeasible(self.svfir, cmp_var, intraEdge.getSuccessorCondValue(), abstractState)
+        condition = abstractState.getVar(cmp_var.getId())
+        if not condition.isInterval():
+            return True
+        feasible_values = condition.getInterval().clone()
+        successor = intraEdge.getSuccessorCondValue()
+        feasible_values.meet_with(IntervalValue(successor, successor))
+        return not feasible_values.isBottom()
 
 
 
@@ -1049,9 +1052,12 @@ class AbstractExecution:
     def updateStateOnCall(self, call: pysvf.CallPE):
         node = call.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        lhs = call.getLHSVarID()
-        rhs = call.getRHSVarID()
-        abstract_state[lhs] = abstract_state[rhs]
+        result = AbstractValue()
+        for index in range(call.getOpVarNum()):
+            call_node = call.getOpCallICFGNode(index)
+            if call_node in self.post_abs_trace:
+                result.join_with(self.post_abs_trace[call_node][call.getOpVarId(index)])
+        abstract_state[call.getResId()] = result
 
 
     def updateStateOnRet(self, ret: pysvf.RetPE):
@@ -1103,14 +1109,15 @@ class AbstractExecution:
         # Field-insensitive base object
         if isinstance(obj, pysvf.BaseObjVar):
             # Get base size
-            access_offset = abstract_state.getByteOffset(gep)
+            self.ae_manager.updateAbsState(gep.getICFGNode(), abstract_state)
+            access_offset = self.ae_manager.getGepByteOffset(gep)
             return access_offset
 
         # A sub-object of an aggregate object
         elif isinstance(obj, pysvf.GepObjVar):
             access_offset = (
                     self.buf_overflow_helper.getGepObjOffsetFromBase(obj)
-                    + abstract_state.getByteOffset(gep)
+                    + self.ae_manager.getGepByteOffset(gep)
             )
             return access_offset
 
@@ -1127,8 +1134,9 @@ class AbstractExecution:
         lhs = gep.getLHSVarID()
         rhs = gep.getRHSVarID()
         if abstract_state.getVar(rhs).isAddr():
-            offset = abstract_state.getElementIndex(gep)
-            abstract_state[lhs] = abstract_state.getGepObjAddrs(rhs, offset)
+            self.ae_manager.updateAbsState(node, abstract_state)
+            offset = self.ae_manager.getGepElementIndex(gep)
+            abstract_state[lhs] = self.ae_manager.getGepObjAddrs(gep.getRHSVar(), offset)
 
     #TODO: your code starts from here
     def updateStateOnStore(self, store: pysvf.StoreStmt):
@@ -1138,7 +1146,9 @@ class AbstractExecution:
         lhs = store.getLHSVarID()
         rhs = store.getRHSVarID()
         if abstract_state.getVar(lhs).isAddr():
-            abstract_state.storeValue(lhs, abstract_state[rhs])
+            self.ae_manager.updateAbsState(node, abstract_state)
+            self.ae_manager.storeValue(store.getLHSVar(), abstract_state[rhs], node)
+            self.post_abs_trace[node] = self.ae_manager.getAbsState(node).clone()
 
     #TODO: your code starts from here
     # Find the comparison predicates in "class BinaryOPStmt:OpCode" under SVF/svf/include/SVFIR/SVFStatements.h
@@ -1152,7 +1162,8 @@ class AbstractExecution:
             op1 = binary.getOpVar(0)
             op2 = binary.getOpVar(1)
 
-            if not abstract_state.getVar(op1.getId()).isInterval() or abstract_state.getVar(op2.getId()).isInterval():
+            if (not abstract_state.getVar(op1.getId()).isInterval()
+                    or not abstract_state.getVar(op2.getId()).isInterval()):
                 raise UnknownException("Operands must be intervals")
             result = IntervalValue(0)
             val1 = abstract_state[op1.getId()].getInterval()
@@ -1200,7 +1211,8 @@ class AbstractExecution:
         lhs = load.getLHSVarID()
         rhs = load.getRHSVarID()
         if abstract_state.getVar(rhs).isAddr():
-            abstract_state[lhs] = abstract_state.loadValue(rhs)
+            self.ae_manager.updateAbsState(node, abstract_state)
+            abstract_state[lhs] = self.ae_manager.loadValue(load.getRHSVar(), node)
         else:
             abstract_state[lhs] = AbstractValue(IntervalValue.top())
 
@@ -1241,9 +1253,10 @@ class AbstractExecution:
                 rhs = stmt.getRHSVarID()
 
                 # Update GEP object offset from base
+                self.ae_manager.updateAbsState(stmt.getICFGNode(), abstract_state)
                 self.buf_overflow_helper.updateGepObjOffsetFromBase(abstract_state,
                     abstract_state[lhs].getAddrs(),  abstract_state[rhs].getAddrs(),
-                    abstract_state.getByteOffset(stmt)
+                    self.ae_manager.getGepByteOffset(stmt)
                 )
 
                 # TODO: your code starts from here
@@ -1299,7 +1312,7 @@ class AbstractExecution:
                     msg = "Buffer overflow detected. Objsize: {}, but try to access offset {}".format(obj_size, access_offset)
                     self.buf_overflow_helper.reportBufOverflow(extCallNode, msg)
                 else:
-                    self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), abstract_state[data_size_id].getInterval(), abstract_state[position_id].getInterval().getIntNumeral())
+                    self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), abstract_state[data_size_id].getInterval(), abstract_state[position_id].getInterval().getIntNumeral(), extCallNode)
         # TODO: handle external calls
         # void str_insert(void *buffer, const void *data, size_t position);
         elif func_name == "str_insert":
@@ -1308,7 +1321,7 @@ class AbstractExecution:
             abstract_state = self.post_abs_trace[extCallNode]
             buffer_id = extCallNode.getArgument(0).getId()
             position_id = extCallNode.getArgument(2).getId()
-            strlen = self.buf_overflow_helper.getStrlen(abstract_state, extCallNode.getArgument(1))
+            strlen = self.buf_overflow_helper.getStrlen(abstract_state, extCallNode.getArgument(1), extCallNode)
 
             for addr in abstract_state[buffer_id].getAddrs():
                 obj_id = abstract_state.getIDFromAddr(addr)
@@ -1319,7 +1332,7 @@ class AbstractExecution:
                     msg = f"Buffer overflow detected. Objsize: {obj_size}, but try to access offset {access_offset}"
                     self.buf_overflow_helper.reportBufOverflow(extCallNode, msg)
                 else:
-                    self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), strlen, abstract_state[position_id].getInterval().getIntNumeral())
+                    self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), strlen, abstract_state[position_id].getInterval().getIntNumeral(), extCallNode)
 
     """
     Handle ICFG nodes in a cycle using widening and narrowing operators.

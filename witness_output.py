@@ -44,7 +44,7 @@ BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 
 VIOLATION_KEY = '<data key="violation">true</data>'
 
-def generate_witness(result, source_file_path, prop_file_path, output):
+def generate_witness(result, source_file_path, prop_file_path, output, bits="64"):
     if "Correct" in result:
         witness_type = "correctness_witness"
         violation = ""
@@ -62,7 +62,7 @@ def generate_witness(result, source_file_path, prop_file_path, output):
 
     # TODO: Identify if this needs to be reverted to copy the spec.
     # SVF-SVC only works in 64-bit mode but programs can be input as 32-bit.
-    bits = "64bit"
+    # bits = "64bit"
 
     data = {
         "witness_type": witness_type,
@@ -70,7 +70,7 @@ def generate_witness(result, source_file_path, prop_file_path, output):
         "hash": file_hash,
         "spec": spec,
         "version": VERSION,
-        "bits": bits,
+        "bits": f"{bits}bit",
         "creation_time": datetime.datetime.now().astimezone().replace(microsecond=0).isoformat(),
         "violation": violation
     }

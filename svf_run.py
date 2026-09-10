@@ -26,10 +26,10 @@ def main():
     log(f"Arguments: {args}")
     log(f"Extra unknown arguments: {extra}")
 
-    runSVF(args.c_file, args.prop, args.witness)
+    runSVF(args.c_file, args.prop, args.witness, args.bits)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -48,7 +48,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
-    command = ["clang", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
+    command = ["clang", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}")
@@ -131,7 +131,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path):
         correctness = "Unknown"
 
     ###TODO: right now it doesnt do invariants
-    witness_output.generate_witness(correctness, input_file_path, prop_file_path, witness_file_path)
+    witness_output.generate_witness(
+        correctness, input_file_path, prop_file_path, witness_file_path, bits)
 
     working_file.close()
     pysvf.releasePAG()

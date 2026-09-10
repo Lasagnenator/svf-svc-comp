@@ -70,36 +70,104 @@ A running list of things to work on:
 
 ## Local benchmark scoring
 
-Use the already-present SV-COMP corpus; the runner never clones or downloads it. Activate the
-repository venv first so both the runner and `svf_run.py` use the preinstalled dependencies:
+The runner reproduces SV-COMP 2026 scoring for the three C meta categories svf-svc competes in:
+`reachsafety`, `memsafety`, and `softwaresystems`. Leaf categories mirror `benchmark-defs/svf-svc.xml`.
+
+### Fetching benchmarks
+
+The corpus is large, so it is fetched on demand and never committed. `tests/fetch_benchmarks.py`
+performs a blobless sparse checkout and materialises only what is needed. The default destination
+is `../sv-benchmarks`, outside the repository.
 
 ```sh
-python tests/tester.py "$(realpath ../sv-benchmarks-main-c)" "$PWD" \
-  --reach --sample 1% --seed 0
+# Task definitions and property files only (no C sources).
+python tests/fetch_benchmarks.py --category reachsafety --metadata-only
+
+# Or every family used by a category.
+python tests/fetch_benchmarks.py --category reachsafety
 ```
 
-Sampling is deterministic and stratified by property, data model, and expected verdict. Omit
-`--sample` for the complete selected population, use `--specific array-crafted/bAnd1` for one
-benchmark family, or add `--dry-run` to inspect `manifest.json` without executing the tool.
+For a sampled run, fetch metadata first, select the sample, then materialise only those sources:
+
+```sh
+python tests/tester.py ../sv-benchmarks "$PWD" \
+  --category reachsafety --sample-count 50 --seed 0 --dry-run --results-dir /tmp/sample
+python tests/fetch_benchmarks.py --from-manifest /tmp/sample/manifest.json --dest ../sv-benchmarks
+```
+
+### Running
+
+Activate the SVF-Python environment so the runner and `svf_run.py` share bindings, then run the
+same seed without `--dry-run` to execute the identical selection:
+
+```sh
+python tests/tester.py ../sv-benchmarks "$PWD" \
+  --category reachsafety --sample-count 50 --seed 0
+```
+
+Repeat `--category` to combine meta categories. Sampling is deterministic and stratified by leaf
+category, data model, and expected verdict, and every leaf category is represented when the sample
+is large enough. Use `--sample 1%` for a proportional sample, omit both for the full population, or
+add `--dry-run` to inspect `manifest.json` without executing the tool.
 
 The default `quick` profile uses 30 CPU seconds, 45 wall seconds, and 5 GiB. Use `--profile
-competition` for 960 CPU seconds, 1020 wall seconds, and 15 GiB, or override individual limits.
-Wall time applies to the process group; CPU and memory use POSIX per-process limits, so this is an
-approximation of BenchExec's aggregate accounting. Results are written under `test-results/<timestamp>/`:
+competition` for the SV-COMP limits of 900 CPU seconds, 900 wall seconds, and 15 GB, or override
+individual limits. Wall time applies to the process group; CPU and memory use POSIX per-process
+limits, so this approximates rather than replaces BenchExec's aggregate accounting.
 
-- `manifest.json` records the corpus, limits, sample seed, and exact selected runs.
-- `results.jsonl` is flushed after every run and includes verdict, score, termination reason,
-  diagnostic tail, log path, and the direct tool invocation.
-- `logs/` retains complete stdout and stderr for debugging.
-- `summary.json` reports the provisional raw score and result counts; `--output FILE.csv` adds CSV.
+Results are written under `test-results/<timestamp>/`:
 
-Scoring uses the SV-COMP raw weights: correct true `+2`, correct false `+1`, false alarm `-16`,
-and missed violation `-32`. Unknowns, timeouts, crashes, and unsupported tasks score zero. This is
-a progress score, not an official competition score, because the local runner does not validate
-witnesses.
+- `manifest.json` records the corpus, categories, limits, sample seed, and exact selected runs.
+- `results.jsonl` is flushed after every run and includes verdict, score, witness status,
+  termination reason, diagnostic tail, log path, and the direct tool invocation.
+- `logs/` retains complete stdout, stderr, and generated witnesses.
+- `summary.json` reports the score, normalized leaf-category scores, and result counts;
+  `--output FILE.csv` adds CSV.
 
-The unchanged competition entrypoint currently ignores `--bits`, so ILP32 tasks are recorded as
-unsupported rather than scored under the wrong data model. Memory-safety and cleanup tasks are
-also recorded as unsupported because `svf_run.py` does not implement those property dispatches.
-Overflow tasks are not score-eligible yet because that branch currently detects buffer bounds,
-whereas SV-COMP's `no-overflow.prp` asks about signed-integer overflow.
+### Scoring and witness validation
+
+Scoring uses the SV-COMP weights: correct true `+2`, correct false `+1`, false alarm `-16`, and
+missed violation `-32`. Unknowns, timeouts, crashes, and unsupported tasks score zero.
+
+Witnesses are retained under `logs/`. Validation is reported per run in the `witness_validation`
+field but does not change the score, so a run needs no validator. Note that SV-COMP itself awards no
+positive points for a correct answer whose required witness is not confirmed, so the score here is
+an upper bound on what the competition would award.
+
+To confirm witnesses, supply an external validator. `tests/validate_witness.sh` wraps CPAchecker and
+exits zero only on confirmation. It has been verified against CPAchecker 4.2, which needs Java 17 or
+newer and selects validation through config files rather than a command-line flag:
+
+```sh
+export CPACHECKER_HOME=/opt/CPAchecker-4.2-unix
+python tests/tester.py ../sv-benchmarks "$PWD" \
+  --category reachsafety --profile competition \
+  --validation-wall-limit 600 \
+  --validator-command 'tests/validate_witness.sh {witness} {input} {property} {bits}'
+```
+
+Placeholders are `{witness}`, `{input}`, `{property}`, and `{bits}`. Previously computed results can
+be supplied instead with `--validation-results results.json`, a JSON object mapping run IDs to
+`correct` or `unconfirmed`.
+
+Validators reject a witness outright when its declared architecture differs from the task's data
+model, so `svf_run.py` passes `--bits` to clang and records the same value in the witness. Most
+ReachSafety tasks are ILP32, so without this no ILP32 witness can be validated.
+
+### Current capability
+
+Benchmark selection covers all three meta categories. Memory-safety, cleanup, termination, and
+signed-integer overflow tasks are selected and reported, then marked unsupported and scored zero
+rather than being silently dropped. Memory dispatch is commented out in `SUPPORTED_PROPERTIES` and
+can be re-enabled once `svf_run.py` implements it. The existing overflow path detects buffer bounds, whereas `no-overflow.prp` concerns signed-integer overflow.
+
+### Continuous integration
+
+`.github/workflows/benchmark.yml` runs on pull requests into `main`. It executes the tester unit
+tests, caches the benchmark metadata checkout, selects a deterministic sample seeded by the commit
+SHA, fetches only those sources, runs them, and uploads the results directory as an artifact.
+
+The tester exits non-zero when the harness itself fails, meaning the tool never started or the run
+was interrupted, so CI gates on its exit code. Analyser unknowns and tool errors are reported
+without failing the build, since they reflect coverage rather than runner health. Use the workflow
+dispatch inputs to choose a category or sample size, capped at 100 runs.

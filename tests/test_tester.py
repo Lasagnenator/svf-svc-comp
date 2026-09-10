@@ -10,6 +10,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from tests import tester
 
@@ -132,13 +133,77 @@ class TesterUnitTests(unittest.TestCase):
         cleanup = self.make_task("cleanup", property_name="cleanup")
         overflow = self.make_task("overflow", property_name="overflow")
         self.assertTrue(tester.score_eligible(ilp32))
-        self.assertTrue(tester.score_eligible(safety))
-        self.assertTrue(tester.score_eligible(cleanup))
+        self.assertFalse(tester.score_eligible(safety))
+        self.assertFalse(tester.score_eligible(cleanup))
         self.assertFalse(tester.score_eligible(overflow))
         unsupported = tester.unsupported_reason(overflow)
         self.assertIsNotNone(unsupported)
         assert unsupported is not None
         self.assertIn("signed-integer overflow", unsupported[1])
+
+    def categorised(self, task, category):
+        return tester.Task(
+            task.run_id, task.yaml_path, task.yaml_relative, task.input_files,
+            task.property_file, task.property_name, task.expected, task.data_model,
+            task.subproperty, category)
+
+    def test_category_sampling_represents_each_leaf_when_possible(self):
+        tasks = [
+            self.categorised(self.make_task(f"a-{index}"), "C.unreach-call.A")
+            for index in range(10)
+        ] + [
+            self.categorised(self.make_task(f"b-{index}"), "C.unreach-call.B")
+            for index in range(10)
+        ]
+        selected = tester.sample_tasks(tasks, None, "seed", count=2)
+        self.assertEqual({task.category for task in selected},
+                         {"C.unreach-call.A", "C.unreach-call.B"})
+
+    def test_classify_extracts_reported_subproperty(self):
+        plain = tester.classify("REACH Correct\n", "", 0, False)
+        tagged = tester.classify("MEMORY Incorrect(valid-deref)\n", "", 0, False)
+        self.assertEqual(plain[0], "true")
+        self.assertEqual(plain[6], "unreach-call")
+        self.assertEqual(tagged[0], "false")
+        self.assertEqual(tagged[6], "valid-deref")
+
+    @mock.patch("tests.tester.subprocess.run")
+    def test_false_answer_runs_configured_validator(self, run):
+        task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
+        run.return_value = SimpleNamespace(returncode=0, stdout="witness confirmed", stderr="")
+        args = SimpleNamespace(validation_results={},
+                               validator_command="validate {witness} {input}",
+                               validation_wall_limit=5)
+        with tempfile.TemporaryDirectory() as directory:
+            witness = Path(directory) / "witness.graphml"
+            witness.write_text("<graphml/>")
+            validation = tester.validate_witness(
+                task, "false", args, witness, ["input.c"], "property.prp")
+        self.assertEqual(validation, "correct")
+        run.assert_called_once()
+
+    @mock.patch("tests.tester.subprocess.run")
+    def test_true_answer_without_witness_requirement_skips_validator(self, run):
+        task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
+        args = SimpleNamespace(validation_results={},
+                               validator_command="validate {witness}",
+                               validation_wall_limit=5)
+        validation = tester.validate_witness(
+            task, "true", args, Path("missing.graphml"), ["input.c"], "property.prp")
+        self.assertEqual(validation, "not-required")
+        run.assert_not_called()
+
+    def test_normalized_score_weights_leaf_categories_equally(self):
+        first = self.categorised(self.make_task("first"), "A")
+        second = self.categorised(self.make_task("second", expected=False), "B")
+        results = [
+            SimpleNamespace(category="A", score=2, answer="true",
+                            expected=True, classification="result"),
+            SimpleNamespace(category="B", score=1, answer="false",
+                            expected=False, classification="result"),
+        ]
+        summary = tester.summarize(results, 2, [first, second], 0)
+        self.assertEqual(summary["normalized_score"], 3)
 
 
 class TesterIntegrationTests(unittest.TestCase):
