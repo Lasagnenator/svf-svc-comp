@@ -39,6 +39,11 @@ def set_sparse_patterns(dest, patterns):
     run(["git", "-C", str(dest), "sparse-checkout", "set", "--no-cone", *patterns])
 
 
+def add_sparse_patterns(dest, patterns):
+    # "add" inherits the cone mode from "set"; passing --no-cone here stores it as a pattern.
+    run(["git", "-C", str(dest), "sparse-checkout", "add", *patterns])
+
+
 def selected_set_names(categories):
     names = set()
     for category in categories:
@@ -108,7 +113,7 @@ def main(argv=None):
             build_parser().error(f"manifest lists no input files: {args.from_manifest}")
         print(f"Materialising {len(patterns)} sampled source files in {dest}")
         try:
-            set_sparse_patterns(dest, [*METADATA_PATTERNS, *patterns])
+            add_sparse_patterns(dest, patterns)
         except subprocess.CalledProcessError as error:
             print(f"git failed with exit code {error.returncode}", file=sys.stderr)
             return error.returncode

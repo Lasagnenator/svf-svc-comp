@@ -18,7 +18,7 @@ on:
 
 env:
   BENCH_REVISION: svcomp26
-  BENCH_DIR: ${{ github.workspace }}/../sv-benchmarks
+  BENCH_DIR: ${{ github.workspace }}/sv-benchmarks
   CATEGORY: ${{ github.event.inputs.category || 'reachsafety' }}
   SAMPLE_COUNT: ${{ github.event.inputs.sample_count || '50' }}
   SEED: ${{ github.sha }}
