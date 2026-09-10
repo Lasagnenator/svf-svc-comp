@@ -5,3 +5,4 @@ tests/*
 venv
 test-results/
 dist/
+authorized_keys

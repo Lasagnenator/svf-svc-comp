@@ -26,10 +26,11 @@ Generate your own SSH key:
 ssh-keygen -t ed25519 -C "your.email@example.com"
 ```
 
-Copy your public SSH key to a file called "authorized_keys". This file will keep a list of public keys:
+Then copy your public key to authorized_keys. This file is gitignored:
 ```sh
 cat ~/.ssh/id_ed25519.pub > authorized_keys
 ```
+
 Build the docker image and run the container as so:
 ```sh
 docker build -t svf-comp:01 .
@@ -37,9 +38,14 @@ docker run -itd -p 2222:22 --name svf-comp svf-comp:01
 ```
 Then connect via SSH:
 ```sh
-ssh root@localhost -p 2222
+ssh svf@localhost -p 2222
 ```
 
+If you rebuild and reconnect to the same host/port, you may see a "host key
+has changed" warning. This is expected. Clear it with:
+```sh
+ssh-keygen -R "[localhost]:2222"
+```
 
 The current entrypoint is `svf_run.py`. From the repository root, run:
 ```sh

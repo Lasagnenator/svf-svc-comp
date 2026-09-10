@@ -7,17 +7,24 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y openssh-server
 RUN mkdir /var/run/sshd
 
+# Define home
+ENV HOME=/home/svf
+ENV APP_DIR=${HOME}/svf-svc-comp
+RUN useradd --create-home --uid 10001 --shell /bin/bash svf
+
 # Make .ssh directory in root, no one else but root has full access
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+RUN mkdir -p /home/svf/.ssh && chmod 700 /home/svf/.ssh
 
-# Copy team public key file into root's authorised keys
-COPY authorized_keys /root/.ssh/authorized_keys
+# Copy team public key file into svf's authorised keys
+COPY authorized_keys /home/svf/.ssh/authorized_keys
 
-# No one else but root has read and write access to authorized keys
-RUN chmod 600 /root/.ssh/authorized_keys
+# No one else svf account has read and write access to authorized keys
+RUN chmod 600 /home/svf/.ssh/authorized_keys
 
-# Allow root login with key only
-RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+RUN chown -R svf:svf /home/svf/.ssh
+
+# Login in as svf
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
 
 # Disable password authentication
 RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -28,10 +35,6 @@ EXPOSE 22
 # Run SSH when container starts
 CMD ["/usr/sbin/sshd", "-D"]
 
-# Define home
-ENV HOME=/home/svf
-ENV APP_DIR=${HOME}/svf-svc-comp
-RUN useradd --create-home --uid 10001 --shell /bin/bash svf
 
 # Define dependencies.
 ENV lib_deps="cmake g++ gcc clang git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
@@ -55,6 +58,8 @@ RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt
 RUN /opt/venv/bin/python -m pip install pyyaml
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
+RUN echo 'export PATH="/opt/venv/bin:$PATH"' >> /etc/profile
+
 
 # Fix SABER's missing import
 ENV PYSVF_ROOT=/opt/venv/lib/python3.12/site-packages/pysvf/SVF
