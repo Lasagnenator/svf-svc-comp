@@ -37,15 +37,91 @@ PROPERTY_NAMES = {
     "no-overflow.prp": "overflow",
     "valid-memsafety.prp": "safety",
     "valid-memcleanup.prp": "cleanup",
+    "termination.prp": "termination",
 }
-SUPPORTED_PROPERTIES = {"reach", "safety", "cleanup"}
-RESULT_RE = re.compile(r"^(?:REACH|MEMORY|CLEANUP|OVERFLOW) (Correct|Incorrect)$")
+SUPPORTED_PROPERTIES = {
+    "reach",
+    # Re-enable once svf_run.py implements memory property dispatch.
+    # "safety",
+    # "cleanup",
+}
+RESULT_RE = re.compile(
+    r"^(?P<kind>REACH|MEMORY|CLEANUP|OVERFLOW) (?P<verdict>Correct|Incorrect)"
+    r"(?:\((?P<subproperty>[^)]+)\))?$"
+)
 ERROR_RE = re.compile(r"^ERROR(?:\([^)]+\))?$")
 SCORE = {
     (True, "true"): 2,
     (False, "false"): 1,
     (True, "false"): -16,
     (False, "true"): -32,
+}
+
+
+@dataclass(frozen=True)
+class CategorySpec:
+    name: str
+    property_name: str
+    includes: tuple[str, ...]
+    excludes: tuple[str, ...] = ()
+
+
+# Leaf categories as defined by benchmark-defs/svf-svc.xml for SV-COMP 2026.
+SVCOMP26_CATEGORIES = {
+    "reachsafety": (
+        CategorySpec("C.unreach-call.Arrays", "reach", ("Arrays",)),
+        CategorySpec("C.unreach-call.BitVectors", "reach", ("BitVectors",)),
+        CategorySpec("C.unreach-call.Combinations", "reach", ("Combinations",)),
+        CategorySpec("C.unreach-call.ControlFlow", "reach", ("ControlFlow", "Sanity")),
+        CategorySpec("C.unreach-call.ECA", "reach", ("ECA",)),
+        CategorySpec("C.unreach-call.Floats", "reach", ("Floats",)),
+        CategorySpec("C.unreach-call.Hardness", "reach", ("Hardness",)),
+        CategorySpec("C.unreach-call.Hardware", "reach", ("Hardware",)),
+        CategorySpec("C.unreach-call.Heap", "reach", ("Heap", "LinkedLists")),
+        CategorySpec("C.unreach-call.Loops", "reach", ("Loops", "VerifyThis-Loops")),
+        CategorySpec("C.unreach-call.ProductLines", "reach", ("ProductLines",)),
+        CategorySpec("C.unreach-call.Recursive", "reach", ("Recursive", "VerifyThis-Recursive")),
+        CategorySpec("C.unreach-call.Sequentialized", "reach", ("Sequentialized",)),
+        CategorySpec("C.unreach-call.XCSP", "reach", ("XCSP",)),
+    ),
+    "memsafety": (
+        CategorySpec("C.valid-memcleanup.Main", "cleanup",
+                     ("Heap", "Juliet", "LinkedLists", "VerifyThis-Loops", "VerifyThis-Recursive")),
+        CategorySpec("C.valid-memsafety.Arrays", "safety",
+                     ("Arrays", "Heap-Termination", "VerifyThis-Loops", "VerifyThis-Recursive")),
+        CategorySpec("C.valid-memsafety.Heap", "safety", ("Heap",)),
+        CategorySpec("C.valid-memsafety.Juliet", "safety", ("Juliet",)),
+        CategorySpec("C.valid-memsafety.LinkedLists", "safety", ("LinkedLists",)),
+        CategorySpec("C.valid-memsafety.Other", "safety",
+                     ("Loops", "ControlFlow", "ControlFlow-Termination", "Recursive")),
+    ),
+    "softwaresystems": (
+        CategorySpec("C.no-overflow.SoftwareSystems-BusyBox", "overflow", ("SoftwareSystems-BusyBox",)),
+        CategorySpec("C.no-overflow.SoftwareSystems-coreutils", "overflow", ("SoftwareSystems-coreutils",)),
+        CategorySpec("C.no-overflow.SoftwareSystems-uthash", "overflow", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.termination.SoftwareSystems-DeviceDriversLinux64", "termination",
+                     ("SoftwareSystems-DeviceDriversLinux64",)),
+        CategorySpec("C.termination.SoftwareSystems-uthash", "termination", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.unreach-call.SoftwareSystems-AWS-C-Common", "reach",
+                     ("SoftwareSystems-AWS-C-Common",)),
+        CategorySpec("C.unreach-call.SoftwareSystems-DeviceDriversLinux64", "reach",
+                     ("SoftwareSystems-DeviceDriversLinux64",),
+                     ("SoftwareSystems-DeviceDriversLinux64Large",)),
+        CategorySpec("C.unreach-call.SoftwareSystems-DeviceDriversLinux64Large", "reach",
+                     ("SoftwareSystems-DeviceDriversLinux64Large",)),
+        CategorySpec("C.unreach-call.SoftwareSystems-Intel-TDX-Module", "reach",
+                     ("SoftwareSystems-Intel-TDX-Module",)),
+        CategorySpec("C.unreach-call.SoftwareSystems-Other", "reach",
+                     ("SoftwareSystems-coreutils", "SoftwareSystems-BusyBox", "SoftwareSystems-OpenBSD")),
+        CategorySpec("C.unreach-call.SoftwareSystems-uthash", "reach", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.valid-memcleanup.SoftwareSystems-uthash", "cleanup", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.valid-memsafety.SoftwareSystems-coreutils", "safety", ("SoftwareSystems-coreutils",)),
+        CategorySpec("C.valid-memsafety.SoftwareSystems-DeviceDriversLinux64", "safety",
+                     ("SoftwareSystems-DeviceDriversLinux64",)),
+        CategorySpec("C.valid-memsafety.SoftwareSystems-Other", "safety",
+                     ("SoftwareSystems-BusyBox", "SoftwareSystems-OpenBSD")),
+        CategorySpec("C.valid-memsafety.SoftwareSystems-uthash", "safety", ("SoftwareSystems-uthash",)),
+    ),
 }
 
 
@@ -60,16 +136,18 @@ class Task:
     expected: bool
     data_model: str
     subproperty: str | None = None
+    category: str | None = None
 
     @property
     def stratum(self):
-        return (self.property_name, self.data_model, str(self.expected).lower())
+        return (self.category or self.property_name, self.data_model, str(self.expected).lower())
 
 
 @dataclass
 class Result:
     run_id: str
     task_file: str
+    category: str | None
     input_files: list[str]
     property: str
     property_file: str
@@ -79,6 +157,10 @@ class Result:
     answer: str
     classification: str
     score: int
+    raw_score: int
+    reported_subproperty: str | None
+    witness_validation: str
+    witness_path: str | None
     return_code: int | None
     termination_reason: str
     signal: str | None
@@ -205,7 +287,7 @@ def expand_set_files(corpus_root, set_files):
     }
 
 
-def load_tasks(yaml_path, corpus_root, enabled):
+def load_tasks(yaml_path, corpus_root, enabled, category=None):
     relative = yaml_path.relative_to(corpus_root).as_posix()
     try:
         with yaml_path.open() as stream:
@@ -234,16 +316,17 @@ def load_tasks(yaml_path, corpus_root, enabled):
         expected = prop.get("expected_verdict")
         if not isinstance(expected, bool):
             continue
-        identity = f"{relative}\0{index}\0{property_file}"
+        identity = f"{relative}\0{index}\0{property_file}\0{category or ''}"
         run_id = hashlib.sha256(identity.encode()).hexdigest()[:16]
         tasks.append(Task(run_id, yaml_path, relative, inputs, property_file,
-                          property_name, expected, str(data_model), prop.get("subproperty")))
+                          property_name, expected, str(data_model), prop.get("subproperty"), category))
     return tasks
 
 
-def discover_tasks(args, yaml_paths=None):
+def discover_tasks(args, yaml_paths=None, enabled=None, category=None):
     corpus_root = args.bench_root
-    enabled = {name for name in PROPERTY_NAMES.values() if getattr(args, name)}
+    if enabled is None:
+        enabled = {name for name in PROPERTY_NAMES.values() if getattr(args, name, False)}
     tasks = []
     discovery_errors = []
     candidates = yaml_paths if yaml_paths is not None else sorted((corpus_root / "c").rglob("*.yml"))
@@ -256,10 +339,40 @@ def discover_tasks(args, yaml_paths=None):
         if any(skip in relative for skip in args.skip):
             continue
         try:
-            tasks.extend(load_tasks(yaml_path, corpus_root, enabled))
+            tasks.extend(load_tasks(yaml_path, corpus_root, enabled, category))
         except ValueError as error:
             discovery_errors.append((relative, str(error)))
     return tasks, discovery_errors
+
+
+def discover_category_tasks(args):
+    tasks = []
+    discovery_errors = []
+    metadata = []
+    for meta_category in args.category:
+        for spec in SVCOMP26_CATEGORIES[meta_category]:
+            include_files = resolve_set_files(args.bench_root, spec.includes)
+            include_paths, include_metadata, _ = expand_set_files(args.bench_root, include_files)
+            excluded_paths = set()
+            exclude_metadata = []
+            if spec.excludes:
+                exclude_files = resolve_set_files(args.bench_root, spec.excludes)
+                excluded, exclude_metadata, _ = expand_set_files(args.bench_root, exclude_files)
+                excluded_paths.update(excluded)
+            selected_paths = [path for path in include_paths if path not in excluded_paths]
+            category_tasks, category_errors = discover_tasks(
+                args, selected_paths, {spec.property_name}, spec.name)
+            tasks.extend(category_tasks)
+            discovery_errors.extend(category_errors)
+            metadata.append({
+                "name": spec.name,
+                "property": spec.property_name,
+                "include_sets": [entry["path"] for entry in include_metadata],
+                "exclude_sets": [entry["path"] for entry in exclude_metadata],
+                "matched_yaml_count": len(selected_paths),
+                "property_run_count": len(category_tasks),
+            })
+    return tasks, discovery_errors, metadata
 
 
 def stable_rank(task, seed):
@@ -280,7 +393,7 @@ def sample_tasks(tasks, percent, seed, count=None):
 
     properties = {}
     for task in tasks:
-        properties.setdefault(task.property_name, []).append(task)
+        properties.setdefault(task.category or task.property_name, []).append(task)
     property_order = sorted(
         properties,
         key=lambda name: hashlib.sha256(f"{seed}\0property\0{name}".encode()).digest(),
@@ -329,9 +442,9 @@ def limit_resources(cpu_seconds, memory_bytes):
 
 def classify(stdout, stderr, return_code, timed_out):
     if timed_out:
-        return "unknown", "timeout", None, "wall-time limit exceeded", "wall_timeout", None
+        return "unknown", "timeout", None, "wall-time limit exceeded", "wall_timeout", None, None
     combined_lines = (stdout + "\n" + stderr).splitlines()
-    result_lines = [match.group(1) for line in combined_lines
+    result_lines = [match for line in combined_lines
                     if (match := RESULT_RE.fullmatch(line.strip()))]
     error_codes = [line.strip() for line in combined_lines
                    if ERROR_RE.fullmatch(line.strip())]
@@ -347,17 +460,80 @@ def classify(stdout, stderr, return_code, timed_out):
         if not message:
             message = f"tool terminated with {signal_name or f'exit code {return_code}'}"
         return ("unknown", "tool_error", error_codes[-1] if error_codes else None,
-                message, reason, signal_name)
-    if len(set(result_lines)) > 1:
-        return "unknown", "tool_error", None, "conflicting verdicts in tool output", "invalid_output", None
+                message, reason, signal_name, None)
+    verdicts = {match.group("verdict") for match in result_lines}
+    if len(verdicts) > 1:
+        return ("unknown", "tool_error", None, "conflicting verdicts in tool output",
+                "invalid_output", None, None)
     if result_lines:
-        answer = "true" if result_lines[-1] == "Correct" else "false"
-        return answer, "result", None, None, "completed", None
+        match = result_lines[-1]
+        answer = "true" if match.group("verdict") == "Correct" else "false"
+        default_subproperties = {
+            "REACH": "unreach-call",
+            "CLEANUP": "valid-memcleanup",
+            "OVERFLOW": "no-overflow",
+        }
+        reported = match.group("subproperty") or default_subproperties.get(match.group("kind"))
+        return answer, "result", None, None, "completed", None, reported
     if any(line.strip() == "Unknown" for line in combined_lines):
-        return "unknown", "unknown", None, diagnostic_tail(stderr), "completed", None
+        return "unknown", "unknown", None, diagnostic_tail(stderr), "completed", None, None
     return ("unknown", "tool_error", error_codes[-1] if error_codes else None,
             diagnostic_tail(stderr or stdout) or "tool produced no recognized verdict",
-            "invalid_output", None)
+            "invalid_output", None, None)
+
+
+def witness_required(task, answer):
+    if task.category is None:
+        return False
+    if answer == "false":
+        return True
+    if task.property_name in {"safety", "cleanup", "termination"}:
+        return False
+    # SV-COMP 2026 does not require correctness witnesses for these leaf categories.
+    return task.category not in {
+        "C.unreach-call.Arrays",
+        "C.unreach-call.Floats",
+        "C.unreach-call.Heap",
+    }
+
+
+def verdict_score(task, answer, reported_subproperty, validation):
+    if answer not in {"true", "false"}:
+        return 0, 0
+    if task.expected is False and answer == "false" and task.subproperty:
+        if reported_subproperty != task.subproperty:
+            return 0, 0
+    raw_score = SCORE[(task.expected, answer)]
+    correct = answer == str(task.expected).lower()
+    if not correct or validation in {"correct", "not-required"}:
+        return raw_score, raw_score
+    return 0, raw_score
+
+
+def validate_witness(task, answer, args, witness_path, input_paths, property_path):
+    if not witness_required(task, answer):
+        return "not-required"
+    validation_results = getattr(args, "validation_results", {})
+    if task.run_id in validation_results:
+        return validation_results[task.run_id]
+    template = getattr(args, "validator_command", None)
+    if not template or not witness_path.is_file():
+        return "unconfirmed"
+    values = {
+        "witness": str(witness_path),
+        "input": input_paths[0],
+        "property": property_path,
+        "bits": "32" if task.data_model == "ILP32" else "64",
+    }
+    try:
+        command = shlex.split(template.format(**values))
+        process = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace", timeout=getattr(args, "validation_wall_limit", 300),
+        )
+    except (KeyError, OSError, subprocess.TimeoutExpired, ValueError):
+        return "unconfirmed"
+    return "correct" if process.returncode == 0 else "unconfirmed"
 
 
 def diagnostic_tail(text, lines=12):
@@ -395,9 +571,11 @@ def run_task(task, args, logs_dir):
     yaml_dir = task.yaml_path.parent
     input_paths = [str((yaml_dir / item).resolve()) for item in task.input_files]
     property_path = str((yaml_dir / task.property_file).resolve())
+    witness_path = logs_dir / safe_log_name(task).replace(".log", ".witness.graphml")
     command = [sys.executable, str(args.svf_root / "svf_run.py")]
     command.extend(input_paths)
-    command.extend(["--prop", property_path, "--witness", "", "--time-limit", str(args.cpu_limit)])
+    command.extend(["--prop", property_path, "--witness", str(witness_path),
+                    "--time-limit", str(args.cpu_limit)])
     if task.data_model == "ILP32":
         command.extend(["--bits", "32"])
     elif task.data_model == "LP64":
@@ -410,11 +588,14 @@ def run_task(task, args, logs_dir):
         error_code, message = unsupported
         log_path.write_text(message + "\n")
         return Result(
-            run_id=task.run_id, task_file=task.yaml_relative, input_files=input_paths,
+            run_id=task.run_id, task_file=task.yaml_relative, category=task.category,
+            input_files=input_paths,
             property=task.property_name, property_file=property_path,
             expected=task.expected, data_model=task.data_model,
             subproperty=task.subproperty, answer="unknown",
-            classification="unsupported", score=0, return_code=None,
+            classification="unsupported", score=0, raw_score=0,
+            reported_subproperty=None, witness_validation="not-run", witness_path=None,
+            return_code=None,
             termination_reason="unsupported", signal=None, wall_seconds=0.0,
             error_code=error_code, error_message=message,
             log_path=str(log_path), rerun_command=rerun,
@@ -450,19 +631,25 @@ def run_task(task, args, logs_dir):
     except Exception as error:
         stdout, stderr = "", f"runner failed to start tool: {error!r}"
     wall_seconds = time.monotonic() - started
-    answer, classification, error_code, error_message, termination_reason, signal_name = classify(
+    answer, classification, error_code, error_message, termination_reason, signal_name, reported = classify(
         stdout, stderr, return_code, timed_out)
-    score = SCORE.get((task.expected, answer), 0)
+    validation = validate_witness(
+        task, answer, args, witness_path, input_paths, property_path)
+    score, raw_score = verdict_score(task, answer, reported, validation)
     log_path.write_text(
         f"command: {rerun}\ncwd: {yaml_dir}\nreturn_code: {return_code}\n"
         f"wall_seconds: {wall_seconds:.6f}\n\n===== STDOUT =====\n{stdout}"
         f"\n===== STDERR =====\n{stderr}", errors="replace")
     return Result(
-        run_id=task.run_id, task_file=task.yaml_relative, input_files=input_paths,
+        run_id=task.run_id, task_file=task.yaml_relative, category=task.category,
+        input_files=input_paths,
         property=task.property_name, property_file=property_path,
         expected=task.expected, data_model=task.data_model,
         subproperty=task.subproperty, answer=answer,
-        classification=classification, score=score, return_code=return_code,
+        classification=classification, score=score, raw_score=raw_score,
+        reported_subproperty=reported, witness_validation=validation,
+        witness_path=str(witness_path) if witness_path.is_file() else None,
+        return_code=return_code,
         termination_reason=termination_reason, signal=signal_name,
         wall_seconds=wall_seconds, error_code=error_code,
         error_message=error_message, log_path=str(log_path), rerun_command=rerun,
@@ -477,20 +664,51 @@ def summarize(results, population, selected, elapsed, interrupted=False):
         counts[key] = counts.get(key, 0) + 1
     eligible = [task for task in selected if score_eligible(task)]
     maximum = sum(2 if task.expected else 1 for task in eligible)
+    category_scores = {}
+    for task in selected:
+        if task.category:
+            category_scores.setdefault(task.category, {"tasks": 0, "score": 0, "raw_score": 0})
+            category_scores[task.category]["tasks"] += 1
+    for result in results:
+        if result.category:
+            category_scores[result.category]["score"] += result.score
+            category_scores[result.category]["raw_score"] += result.raw_score
+    populated = [entry for entry in category_scores.values() if entry["tasks"]]
+    average_size = sum(entry["tasks"] for entry in populated) / len(populated) if populated else 0
+    normalized_score = average_size * sum(
+        entry["score"] / entry["tasks"] for entry in populated) if populated else None
+    normalized_raw_score = average_size * sum(
+        entry["raw_score"] / entry["tasks"] for entry in populated) if populated else None
     return {
         "schema_version": 1,
         "provisional": True,
-        "note": "Raw SV-COMP-style score; witnesses are not validated by this local runner.",
+        "note": "Positive points that require a witness are counted only when validation is confirmed.",
         "population": population,
         "selected": len(selected),
         "completed": len(results),
         "score_eligible": len(eligible),
         "score": sum(result.score for result in results),
+        "raw_score": sum(result.raw_score for result in results),
+        "normalized_score": normalized_score,
+        "normalized_raw_score": normalized_raw_score,
+        "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
         "wall_seconds": elapsed,
         "interrupted": interrupted,
     }
+
+
+def load_validation_results(path):
+    if path is None:
+        return {}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("validation results must be a JSON object keyed by run ID")
+    allowed = {"correct", "unconfirmed"}
+    if any(value not in allowed for value in data.values()):
+        raise ValueError("validation result values must be 'correct' or 'unconfirmed'")
+    return data
 
 
 def write_csv(path, results):
@@ -511,6 +729,9 @@ def build_parser():
     parser.add_argument("--safety", action="store_true", help="test valid-memsafety properties")
     parser.add_argument("--cleanup", action="store_true", help="test valid-memcleanup properties")
     parser.add_argument("--overflow", action="store_true", help="test no-overflow properties")
+    parser.add_argument("--termination", action="store_true", help="test termination properties")
+    parser.add_argument("--category", action="append", choices=tuple(SVCOMP26_CATEGORIES),
+                        help="select an official SV-COMP 2026 C meta category; repeat to combine")
     parser.add_argument("--specific", help="only task paths containing this text")
     parser.add_argument("--skip", action="append", default=[], help="skip task paths containing this text")
     parser.add_argument("--set", dest="sets", action="append", default=[], metavar="SET",
@@ -529,6 +750,12 @@ def build_parser():
     parser.add_argument("--memory-limit-mib", type=int, help="override memory MiB per run")
     parser.add_argument("--results-dir", type=Path, help="output directory (default: test-results/<timestamp>)")
     parser.add_argument("--output", type=Path, help="also write flattened CSV to this path")
+    parser.add_argument("--validation-results", type=Path,
+                        help="JSON object mapping run IDs to correct or unconfirmed witness status")
+    parser.add_argument("--validator-command",
+                        help="validator command template; supports {witness}, {input}, {property}, {bits}")
+    parser.add_argument("--validation-wall-limit", type=int, default=300,
+                        help="validator wall-time limit in seconds (default: 300)")
     parser.add_argument("--verbose", "-v", action="count", default=0)
     return parser
 
@@ -539,32 +766,48 @@ def main(argv=None):
     args.svf_root = args.svf_root.resolve()
     profile_limits = {
         "quick": (30, 45, 5120),
-        "competition": (960, 1020, 15360),
+        "competition": (900, 900, 14305),
     }
     defaults = profile_limits[args.profile]
     args.cpu_limit = args.cpu_limit or defaults[0]
     args.wall_limit = args.wall_limit or defaults[1]
     args.memory_limit_mib = args.memory_limit_mib or defaults[2]
-    if not any((args.reach, args.safety, args.cleanup, args.overflow)):
-        build_parser().error("select at least one property flag")
+    args.category = args.category or []
+    property_flags = (args.reach, args.safety, args.cleanup, args.overflow, args.termination)
+    if not args.category and not any(property_flags):
+        build_parser().error("select at least one property flag or --category")
+    if args.category and (any(property_flags) or args.sets):
+        build_parser().error("--category cannot be combined with property flags or --set")
     if not (args.bench_root / "c").is_dir():
         build_parser().error(f"benchmark root has no c/ directory: {args.bench_root}")
     if not (args.svf_root / "svf_run.py").is_file():
         build_parser().error(f"svf_run.py not found under: {args.svf_root}")
     if min(args.cpu_limit, args.wall_limit, args.memory_limit_mib) <= 0:
         build_parser().error("resource limits must be positive")
-
+    if args.validation_wall_limit <= 0:
+        build_parser().error("validation wall limit must be positive")
     try:
-        set_files = resolve_set_files(args.bench_root, args.sets)
-        if set_files:
-            yaml_paths, set_metadata, set_counts = expand_set_files(args.bench_root, set_files)
-        else:
-            yaml_paths, set_metadata = None, []
+        args.validation_results = load_validation_results(args.validation_results)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        build_parser().error(f"cannot load validation results: {error}")
+
+    category_metadata = []
+    try:
+        if args.category:
+            tasks, discovery_errors, category_metadata = discover_category_tasks(args)
+            set_metadata = []
             set_counts = {"raw_match_count": 0, "unique_yaml_count": 0, "duplicate_count": 0}
+        else:
+            set_files = resolve_set_files(args.bench_root, args.sets)
+            if set_files:
+                yaml_paths, set_metadata, set_counts = expand_set_files(args.bench_root, set_files)
+            else:
+                yaml_paths, set_metadata = None, []
+                set_counts = {"raw_match_count": 0, "unique_yaml_count": 0, "duplicate_count": 0}
+            tasks, discovery_errors = discover_tasks(args, yaml_paths)
     except ValueError as error:
         build_parser().error(str(error))
 
-    tasks, discovery_errors = discover_tasks(args, yaml_paths)
     if not tasks:
         build_parser().error("no benchmark-property runs matched the requested filters")
     try:
@@ -581,6 +824,9 @@ def main(argv=None):
         "schema_version": 1,
         "corpus": str(args.bench_root),
         "tool": str(args.svf_root / "svf_run.py"),
+        "competition": "SV-COMP 2026",
+        "meta_categories": args.category,
+        "categories": category_metadata,
         "set_selectors": args.sets,
         "set_files": set_metadata,
         "set_yaml_count_before_deduplication": set_counts["raw_match_count"],
@@ -596,6 +842,8 @@ def main(argv=None):
             "memory_mib": args.memory_limit_mib,
         },
         "resource_backend": "POSIX process group with per-process rlimits and a runner wall timeout",
+        "validator_command": args.validator_command,
+        "validation_results_supplied": len(args.validation_results),
         "population": len(tasks),
         "score_eligible_population": sum(score_eligible(task) for task in tasks),
         "score_eligible_selected": sum(score_eligible(task) for task in selected),
@@ -650,9 +898,18 @@ def main(argv=None):
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         write_csv(args.output, results)
-    print(f"Provisional score: {summary['score']:+d}/{summary['maximum_selected_score']} "
+    print(f"Competition score: {summary['score']:+d}/{summary['maximum_selected_score']} "
           f"from {summary['completed']}/{summary['selected']} runs")
+    if summary["raw_score"] != summary["score"]:
+        print(f"Raw score before witness confirmation: {summary['raw_score']:+d}")
+    if summary["normalized_score"] is not None:
+        print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))
+    # Distinguish harness failure from analyser weakness so CI can gate on the exit code.
+    start_failures = sum(result.termination_reason == "start_failure" for result in results)
+    if start_failures:
+        print(f"Runner failure: {start_failures} runs never started the tool", file=sys.stderr)
+        return 1
     return 130 if interrupted else 0
 
 
