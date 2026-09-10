@@ -7,6 +7,6 @@ tests/*
 venv
 test-results/
 dist/
-
 sv-benchmarks/
 sv-benchmarks-*/
+authorized_keys
