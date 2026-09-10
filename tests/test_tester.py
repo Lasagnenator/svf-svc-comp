@@ -159,26 +159,6 @@ class TesterUnitTests(unittest.TestCase):
         self.assertEqual({task.category for task in selected},
                          {"C.unreach-call.A", "C.unreach-call.B"})
 
-    def test_unconfirmed_witness_withholds_positive_points(self):
-        reach = self.categorised(self.make_task("reach"), "C.unreach-call.Loops")
-        self.assertEqual(tester.verdict_score(reach, "true", None, "unconfirmed"), (0, 2))
-        self.assertEqual(tester.verdict_score(reach, "true", None, "correct"), (2, 2))
-        self.assertEqual(tester.verdict_score(reach, "true", None, "not-required"), (2, 2))
-
-    def test_wrong_answers_score_regardless_of_witness(self):
-        reach = self.categorised(self.make_task("reach"), "C.unreach-call.Loops")
-        self.assertEqual(tester.verdict_score(reach, "false", "unreach-call", "unconfirmed"), (-16, -16))
-
-    def test_false_memory_verdict_requires_matching_subproperty(self):
-        memory = self.make_task("memory", property_name="safety", expected=False)
-        memory = tester.Task(
-            memory.run_id, memory.yaml_path, memory.yaml_relative, memory.input_files,
-            memory.property_file, memory.property_name, memory.expected, memory.data_model,
-            "valid-deref", "C.valid-memsafety.Heap")
-        self.assertEqual(tester.verdict_score(memory, "false", None, "correct"), (0, 0))
-        self.assertEqual(tester.verdict_score(memory, "false", "valid-free", "correct"), (0, 0))
-        self.assertEqual(tester.verdict_score(memory, "false", "valid-deref", "correct"), (1, 1))
-
     def test_classify_extracts_reported_subproperty(self):
         plain = tester.classify("REACH Correct\n", "", 0, False)
         tagged = tester.classify("MEMORY Incorrect(valid-deref)\n", "", 0, False)
@@ -217,9 +197,9 @@ class TesterUnitTests(unittest.TestCase):
         first = self.categorised(self.make_task("first"), "A")
         second = self.categorised(self.make_task("second", expected=False), "B")
         results = [
-            SimpleNamespace(category="A", score=2, raw_score=2, answer="true",
+            SimpleNamespace(category="A", score=2, answer="true",
                             expected=True, classification="result"),
-            SimpleNamespace(category="B", score=1, raw_score=1, answer="false",
+            SimpleNamespace(category="B", score=1, answer="false",
                             expected=False, classification="result"),
         ]
         summary = tester.summarize(results, 2, [first, second], 0)

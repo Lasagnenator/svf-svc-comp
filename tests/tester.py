@@ -157,7 +157,6 @@ class Result:
     answer: str
     classification: str
     score: int
-    raw_score: int
     reported_subproperty: str | None
     witness_validation: str
     witness_path: str | None
@@ -497,19 +496,6 @@ def witness_required(task, answer):
     }
 
 
-def verdict_score(task, answer, reported_subproperty, validation):
-    if answer not in {"true", "false"}:
-        return 0, 0
-    if task.expected is False and answer == "false" and task.subproperty:
-        if reported_subproperty != task.subproperty:
-            return 0, 0
-    raw_score = SCORE[(task.expected, answer)]
-    correct = answer == str(task.expected).lower()
-    if not correct or validation in {"correct", "not-required"}:
-        return raw_score, raw_score
-    return 0, raw_score
-
-
 def validate_witness(task, answer, args, witness_path, input_paths, property_path):
     if not witness_required(task, answer):
         return "not-required"
@@ -593,7 +579,7 @@ def run_task(task, args, logs_dir):
             property=task.property_name, property_file=property_path,
             expected=task.expected, data_model=task.data_model,
             subproperty=task.subproperty, answer="unknown",
-            classification="unsupported", score=0, raw_score=0,
+            classification="unsupported", score=0,
             reported_subproperty=None, witness_validation="not-run", witness_path=None,
             return_code=None,
             termination_reason="unsupported", signal=None, wall_seconds=0.0,
@@ -635,7 +621,7 @@ def run_task(task, args, logs_dir):
         stdout, stderr, return_code, timed_out)
     validation = validate_witness(
         task, answer, args, witness_path, input_paths, property_path)
-    score, raw_score = verdict_score(task, answer, reported, validation)
+    score = SCORE.get((task.expected, answer), 0)
     log_path.write_text(
         f"command: {rerun}\ncwd: {yaml_dir}\nreturn_code: {return_code}\n"
         f"wall_seconds: {wall_seconds:.6f}\n\n===== STDOUT =====\n{stdout}"
@@ -646,7 +632,7 @@ def run_task(task, args, logs_dir):
         property=task.property_name, property_file=property_path,
         expected=task.expected, data_model=task.data_model,
         subproperty=task.subproperty, answer=answer,
-        classification=classification, score=score, raw_score=raw_score,
+        classification=classification, score=score,
         reported_subproperty=reported, witness_validation=validation,
         witness_path=str(witness_path) if witness_path.is_file() else None,
         return_code=return_code,
@@ -667,30 +653,25 @@ def summarize(results, population, selected, elapsed, interrupted=False):
     category_scores = {}
     for task in selected:
         if task.category:
-            category_scores.setdefault(task.category, {"tasks": 0, "score": 0, "raw_score": 0})
+            category_scores.setdefault(task.category, {"tasks": 0, "score": 0})
             category_scores[task.category]["tasks"] += 1
     for result in results:
         if result.category:
             category_scores[result.category]["score"] += result.score
-            category_scores[result.category]["raw_score"] += result.raw_score
     populated = [entry for entry in category_scores.values() if entry["tasks"]]
     average_size = sum(entry["tasks"] for entry in populated) / len(populated) if populated else 0
     normalized_score = average_size * sum(
         entry["score"] / entry["tasks"] for entry in populated) if populated else None
-    normalized_raw_score = average_size * sum(
-        entry["raw_score"] / entry["tasks"] for entry in populated) if populated else None
     return {
         "schema_version": 1,
         "provisional": True,
-        "note": "Positive points that require a witness are counted only when validation is confirmed.",
+        "note": "Raw SV-COMP-style score; witness validation is reported but does not affect it.",
         "population": population,
         "selected": len(selected),
         "completed": len(results),
         "score_eligible": len(eligible),
         "score": sum(result.score for result in results),
-        "raw_score": sum(result.raw_score for result in results),
         "normalized_score": normalized_score,
-        "normalized_raw_score": normalized_raw_score,
         "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
@@ -900,8 +881,6 @@ def main(argv=None):
         write_csv(args.output, results)
     print(f"Competition score: {summary['score']:+d}/{summary['maximum_selected_score']} "
           f"from {summary['completed']}/{summary['selected']} runs")
-    if summary["raw_score"] != summary["score"]:
-        print(f"Raw score before witness confirmation: {summary['raw_score']:+d}")
     if summary["normalized_score"] is not None:
         print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))

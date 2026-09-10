@@ -8,7 +8,8 @@
 # Usage (via the tester):
 #   --validator-command 'tests/validate_witness.sh {witness} {input} {property} {bits}'
 #
-# Set CPACHECKER_HOME to the CPAchecker installation directory.
+# Set CPACHECKER_HOME to the CPAchecker installation directory. Verified against
+# CPAchecker 4.2, which selects validation via config files rather than a flag.
 
 set -uo pipefail
 
@@ -21,6 +22,7 @@ witness=$1
 input=$2
 property=$3
 bits=$4
+timelimit=${VALIDATOR_TIMELIMIT:-300s}
 
 if [[ -z "${CPACHECKER_HOME:-}" ]]; then
     echo "CPACHECKER_HOME is not set; cannot validate witnesses" >&2
@@ -41,16 +43,20 @@ fi
 
 # Violation witnesses carry an explicit violation flag; anything else is a correctness witness.
 if grep -q 'key="violation"' "$witness"; then
+    config="--violation-witness-validation"
     expected="Verification result: FALSE"
 else
+    config="--correctness-witness-validation"
     expected="Verification result: TRUE"
 fi
 
 output=$("$cpa" \
-    --witness-validation \
+    "$config" \
     --witness "$witness" \
     --spec "$property" \
-    "-$bits" \
+    "--$bits" \
+    --timelimit "$timelimit" \
+    --no-output-files \
     "$input" 2>&1)
 
 if grep -qF "$expected" <<<"$output"; then
