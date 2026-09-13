@@ -6,7 +6,7 @@ import datetime
 import hashlib
 import uuid
 import yaml
-
+from util import VERSION
 
 """
 Sample witness
@@ -62,7 +62,7 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
 
     yaml_list[-1]['metadata']['producer'] = {
         'name': 'svf-svc',
-        'version': '2.0'  # Update based on svc-svf version
+        'version': VERSION  # Update based on svc-svf version
         #'configuration': '(Optional)', The configuration in which the tool ran.
         #'command_line': '(Optional)', The command line with which the tool ran;
         #'description': '(Optional)' Any information not fitting in the previous items.
