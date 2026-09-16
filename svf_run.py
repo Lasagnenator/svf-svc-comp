@@ -20,13 +20,20 @@ def main():
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--witness", default="witness.graphml", help="witness output")
+    parser.add_argument("--witness", default=None, help="witness output")
     parser.add_argument("--witness-format", default="1.0", choices=["1.0", "2.0"], help="witness version")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
     log(f"Extra unknown arguments: {extra}")
+
+    # format 2.0+ only accept .yml file
+    if args.witness is None:
+        args.witness = "witness.yml" if args.witness_format == "2.0" else "witness.graphml"
+    if args.witness_format == "2.0" and not args.witness.endswith(".yml"):
+        log(f"Warning: format 2.0 requires .yml, ignoring {args.witness}")
+        args.witness = "witness.yml"
 
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format)
 
