@@ -139,10 +139,15 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         print("Unknown")
         correctness = "Unknown"
 
-    ###TODO: right now it doesnt do invariants
+    ### TODO: neither path exports invariants yet (2.0 passes an empty invariant set)
     if witness_format == "2.0":
-        with open(prop_file_path) as f:
-            spec = f.read().strip()
+        if "Correct" in correctness and "Incorrect" not in correctness:
+            with open(prop_file_path) as f:
+                spec = f.read().strip()
+            generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
+        else:
+            # violation_sequence not implemented yet; produce nothing
+            log(f"No 2.0 witness for result: {correctness}")
         generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
     else:
         witness_output.generate_witness(
