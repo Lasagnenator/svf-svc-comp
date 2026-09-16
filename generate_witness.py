@@ -114,4 +114,4 @@ if __name__ == "__main__":
 
   input_files = ['multivar_1-1.c']
   specification = 'CHECK( init(main()), LTL(G ! call(reach_error())) )'
-  write_witness(invariants, input_files, specification, 'multivar_1-1.c.invariant_witness.yaml')
+  write_witness(invariants, input_files, specification, 'witness.yml')
