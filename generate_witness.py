@@ -107,7 +107,7 @@ if __name__ == "__main__":
       'type': 'loop_invariant',
       'file_name': 'multivar_1-1.c',
       'line': 22,
-      'column': None, # Set to None if not provided
+      'column': None, # Set to None if not provided, accept integer geq 1 and None
       'function': 'main', # Set to None if not provided
       'value': '( y == x )',
     }]
