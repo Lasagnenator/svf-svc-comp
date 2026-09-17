@@ -226,18 +226,52 @@ class AbstractExecutionHelper:
         self.svfir = svfir
         self.ae_manager = ae_manager
 
-    def reportBufOverflow(self, node, msg):
-        """
-        Record an overflow node and its associated exception.
-        """
+        self.bug_reports = {
+            "Buffer Overflow": [],
+            "Null Pointer Dereference": [],
+            "Use After Free": [],
+            "Double Free": [],
+            "Memory Leak": []
+        }
+    
+    def _register_bug(self, category: str, node, msg: str):
+        """Internal helper to ensure all bugs are recorded consistently."""
         self.node_to_bug_info[node] = msg
+        self.bug_reports[category].append((node, msg))
+
+    def reportBufOverflow(self, node, msg):
+        self._register_bug("Buffer Overflow", node, msg)
+
+    def reportNullDereference(self, node, msg):
+        self._register_bug("Null Pointer Dereference", node, msg)
+
+    def reportUseAfterFree(self, node, msg):
+        self._register_bug("Use After Free", node, msg)
+
+    def reportDoubleFree(self, node, msg):
+        self._register_bug("Double Free", node, msg)
+
+    def reportMemoryLeak(self, node, msg):
+        self._register_bug("Memory Leak", node, msg)
 
     def printReport(self):
-        if len(self.node_to_bug_info) > 0:
-            print("######################Buffer Overflow ({} found)######################".format(len(self.node_to_bug_info)))
-            print("---------------------------------------------")
-            for node, msg in self.node_to_bug_info.items():
-                print(f"{node}: {msg}\n---------------------------------------------")
+        
+        total_bugs = len(self.node_to_bug_info)
+        if total_bugs == 0:
+            print("No memory safety violations detected. Program is safe!")
+            print("=======================================================\n")
+            return
+
+        print(f"Total Memory Safety Violations Found: {total_bugs}\n")
+        
+        for category, reports in self.bug_reports.items():
+            if len(reports) > 0:
+                print(f"###################### {category} ({len(reports)} found) ######################")
+                print("---------------------------------------------")
+                for node, msg in reports:
+                    print(f"{node}: {msg}")
+                    print("---------------------------------------------")
+                print()
 
 
     def updateGepObjOffsetFromBase(self, abstractState: pysvf.AbstractState, gepAddrs: pysvf.AddressValue, objAddrs: pysvf.AddressValue, offset: pysvf.IntervalValue):
@@ -415,11 +449,20 @@ class AbstractExecution:
         self.addressMask = 0x7f000000
         self.flippedAddressMask = (self.addressMask^0xffffffff)
 
+        #mem safety stuff
+        #this is used to map allocated memory to its state, ALLOCATED, and FREED
+        self.node_to_alloc_state = {}
+
         ###SVF SV-COMP-ADDITION
         # storing results here for now, feel free to replace or update how we store it
         self.results = {}
         self.results["reach"] = []
         self.results["bufferoverflow"] = []
+
+        self.results["memoryleak"] = []
+        self.results["nulldereference"] = []
+        self.results["useafterfree"] = []
+        self.results["doublefree"] = []
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -464,6 +507,21 @@ class AbstractExecution:
         self.post_abs_trace[self.icfg.getGlobalICFGNode()] = AbstractState()
         self.pre_abs_trace[self.icfg.getGlobalICFGNode()] = self.post_abs_trace[self.icfg.getGlobalICFGNode()]
         self.post_abs_trace[self.icfg.getGlobalICFGNode()][0]  = AbstractValue(AddressValue(set()))
+
+        # FIX: Pre-populate all constants into the baseline global state.
+        # Since all states derive from the global state, these constants will 
+        # naturally propagate through the entire ICFG via `joinWith`.
+        global_state = self.post_abs_trace[self.icfg.getGlobalICFGNode()]
+        global_state[0] = AbstractValue(AddressValue(set()))
+
+        for var_id, var in self.svfir:
+            if var.isValVar():
+                val_var = var.asValVar()
+                if val_var.isConstNullPtrValVar():
+                    global_state[var_id] = AbstractValue(AddressValue(pysvf.NullMemAddr))
+                elif val_var.isConstIntValVar():
+                    global_state[var_id] = AbstractValue(IntervalValue(val_var.asConstIntValVar().getSExtValue()))
+
         for stmt in self.icfg.getGlobalICFGNode().getSVFStmts():
             self.updateAbsState(stmt)
 
@@ -646,7 +704,7 @@ class AbstractExecution:
         elif fun_name == "nd" or fun_name == "rand":
             lhs_id = node.getRetICFGNode().getActualRet().getId()
             self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
-        elif fun_name == "mem_insert" or fun_name == "str_insert": #isExternalCallForAssignment
+        elif fun_name in ["mem_insert", "str_insert", "malloc", "free"]: 
             self.updateStateOnExtCall(node)
         elif pysvf.isExtCall(node.getCalledFunction()):
             pass
@@ -763,8 +821,16 @@ class AbstractExecution:
     def mergeStatesFromPredecessors(self, block: pysvf.ICFGNode):
         in_edge_num = 0
         abstract_state = pysvf.AbstractState()
+
+        #if a path includes a freed memory obj, then the state when merged is set to freed to be conservative
+        merged_alloc_state = {}
         for edge in block.getInEdges():
             if edge.getSrcNode() in self.post_abs_trace:
+
+                src_alloc = self.node_to_alloc_state.get(edge.getSrcNode(), {})
+                for obj_id, addr in src_alloc.items():
+                    merged_alloc_state[obj_id] = addr
+
                 if isinstance(edge, pysvf.IntraCFGEdge):
                     if edge.getCondition():
                         tmp_es = self.post_abs_trace[edge.getSrcNode()].clone()
@@ -784,6 +850,9 @@ class AbstractExecution:
         if in_edge_num == 0:
             print(f"Error: No predecessors for block {block.getId()}")
             return (False, None)
+        
+        self.node_to_alloc_state[block] = merged_alloc_state
+
         return (True, abstract_state)
 
 
@@ -856,6 +925,26 @@ class AbstractExecution:
                 as_state[main_fun.getArg(i).getId()] = IntervalValue.top()
 
             self.handleFunction(self.icfg.getFunEntryICFGNode(main_fun))
+
+            #Memory Leak Detection at Program Exit
+            main_exit = None
+            for node in self.icfg.getNodes():
+                if node.isFunExit() and node.getFun() == main_fun:
+                    main_exit = node
+                    break
+            
+            if main_exit:
+                final_alloc_state = self.node_to_alloc_state.get(main_exit, {})
+                final_abstract_state = self.post_abs_trace.get(main_exit, pysvf.AbstractState())
+                
+                for obj_id, addr in final_alloc_state.items():
+                    # Check if the allocated address was ever natively freed
+                    if not final_abstract_state.isFreedMem(addr):
+                        msg = f"Memory Leak detected: Object {obj_id} (Address {addr}) was never freed."
+                        self.buf_overflow_helper.reportMemoryLeak(main_exit, msg)
+                        self.results["memoryleak"].append(obj_id)
+            else:
+                print("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
         self.ensureAllAssertsValidated()
@@ -933,7 +1022,7 @@ class AbstractExecution:
                     raise UnknownException("ConstFPObjVar not implemented yet")
 
                 elif isinstance(objVar, pysvf.ConstNullPtrObjVar):
-                    return IntervalValue(0,0)
+                    return AddressValue(pysvf.NullMemAddr)
 
                 elif isinstance(objVar, pysvf.GlobalObjVar):
                     return AddressValue(self.getVirtualMemAddress(var_id))
@@ -1145,6 +1234,9 @@ class AbstractExecution:
         assert isinstance(abstract_state, AbstractState)
         lhs = store.getLHSVarID()
         rhs = store.getRHSVarID()
+
+        self.checkMemorySafety(node, lhs)
+
         if abstract_state.getVar(lhs).isAddr():
             self.ae_manager.updateAbsState(node, abstract_state)
             self.ae_manager.storeValue(store.getLHSVar(), abstract_state[rhs], node)
@@ -1210,6 +1302,9 @@ class AbstractExecution:
         assert isinstance(abstract_state, AbstractState)
         lhs = load.getLHSVarID()
         rhs = load.getRHSVarID()
+
+        self.checkMemorySafety(node, rhs)
+
         if abstract_state.getVar(rhs).isAddr():
             self.ae_manager.updateAbsState(node, abstract_state)
             abstract_state[lhs] = self.ae_manager.loadValue(load.getRHSVar(), node)
@@ -1290,6 +1385,10 @@ class AbstractExecution:
     """
     def updateStateOnExtCall(self, extCallNode: pysvf.CallICFGNode):
         func_name = extCallNode.getCalledFunction().getName()
+        
+        # Initialize the alloc state for this node if not exists
+        if extCallNode not in self.node_to_alloc_state:
+            self.node_to_alloc_state[extCallNode] = {}
 
         # Handle external calls
         # TODO: handle external calls
@@ -1333,6 +1432,46 @@ class AbstractExecution:
                     self.buf_overflow_helper.reportBufOverflow(extCallNode, msg)
                 else:
                     self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), strlen, abstract_state[position_id].getInterval().getIntNumeral(), extCallNode)
+    
+        elif func_name in ["malloc"]:
+            abstract_state = self.post_abs_trace[extCallNode]
+            # 1. Get the return variable (LHS) of the malloc call
+            lhs_id = extCallNode.getRetICFGNode().getActualRet().getId()
+            
+            # 2. Find the SVF HeapObjVar associated with this specific call site
+            heap_obj_id = None
+            for var_id, var in self.svfir:
+                if var.isObjVar() and var.asObjVar().isHeapObjVar():
+                    if var.asObjVar().asHeapObjVar().getICFGNode().getId() == extCallNode.getId():
+                        heap_obj_id = var_id
+                        break
+            
+            if heap_obj_id is not None:
+                # 3. Mint the address and assign it to the return variable
+                alloc_addr = self.getVirtualMemAddress(heap_obj_id)
+                abstract_state[lhs_id] = pysvf.AbstractValue(pysvf.AddressValue(alloc_addr))
+                
+                # 4. Register the allocation for memory leak tracking
+                self.node_to_alloc_state[extCallNode][heap_obj_id] = alloc_addr
+            else:
+                print(f"Warning: Could not find HeapObjVar for malloc at {extCallNode}")
+            
+        elif func_name == "free":
+            abstract_state = self.post_abs_trace[extCallNode]
+            arg_id = extCallNode.getArgument(0).getId()
+            arg_val = abstract_state[arg_id]
+            
+            if arg_val.isAddr():
+                for addr in arg_val.getAddrs():
+                    # Use the new PySVF native API to check if it's already freed
+                    if abstract_state.isFreedMem(addr):
+                        msg = f"Double free detected on address {addr}"
+                        self.buf_overflow_helper.reportDoubleFree(extCallNode, msg)
+                        self.results["doublefree"].append(extCallNode)
+                    else:
+                        # Use the new PySVF native API to register the free
+                        abstract_state.addToFreedAddrs(addr)
+
 
     """
     Handle ICFG nodes in a cycle using widening and narrowing operators.
@@ -1381,6 +1520,46 @@ class AbstractExecution:
                     self.handleICFGCycle(comp)
 
             iteration += 1
+    
+    def checkMemorySafety(self, node: pysvf.ICFGNode, ptr_id: int):
+        abstract_state = self.post_abs_trace[node]
+        ptr_val = abstract_state.getVar(ptr_id)
+        
+        # Grab the underlying SVFVar directly from the IR
+        ptr_var = self.svfir.getGNode(ptr_id)
+
+        # 1. Catch Raw Constant Nulls directly from the IR
+        # Check if it's a ValVar and specifically a ConstNullPtrValVar
+        if ptr_var.isValVar() and ptr_var.asValVar().isConstNullPtrValVar():
+            msg = "Null pointer dereference detected (Raw Constant)."
+            self.buf_overflow_helper.reportNullDereference(node, msg)
+            self.results["nulldereference"].append(node)
+            return
+
+        # 2. Null Pointer Dereference Check (Interval representation)
+        if ptr_val.isInterval():
+            interval = ptr_val.getInterval()
+            if interval.is_zero():
+                msg = "Null pointer dereference detected (Interval 0)."
+                self.buf_overflow_helper.reportNullDereference(node, msg)
+                self.results["nulldereference"].append(node)
+                return
+
+        # 3. Use After Free & Null Address Check
+        if ptr_val.isAddr():
+            for addr in ptr_val.getAddrs():
+                # Check for null address representation using PySVF's native check
+                if addr == 0 or abstract_state.isNullMem(addr):
+                    msg = "Null pointer dereference detected (Address 0)."
+                    self.buf_overflow_helper.reportNullDereference(node, msg)
+                    self.results["nulldereference"].append(node)
+                    continue
+
+                # Use-After-Free check using the native PySVF tracking
+                if abstract_state.isFreedMem(addr):
+                    msg = f"Use After Free detected. Accessing freed address {addr}."
+                    self.buf_overflow_helper.reportUseAfterFree(node, msg)
+                    self.results["useafterfree"].append(node)
 
 
 
