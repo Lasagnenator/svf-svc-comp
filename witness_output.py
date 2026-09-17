@@ -45,12 +45,14 @@ BASE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 VIOLATION_KEY = '<data key="violation">true</data>'
 
 def generate_witness(result, source_file_path, prop_file_path, output, bits="64"):
-    if "Correct" in result:
-        witness_type = "correctness_witness"
-        violation = ""
-    elif "Incorrect" in result:
+    # "Correct" is a substring of "Incorrect", so the Incorrect test must come first
+    # -- otherwise every violation verdict emits a *correctness* witness.
+    if "Incorrect" in result:
         witness_type = "violation_witness"
         violation = VIOLATION_KEY
+    elif "Correct" in result:
+        witness_type = "correctness_witness"
+        violation = ""
     else:
         # Unknown, do not produce a witness file.
         return

@@ -59,9 +59,16 @@ class CFLreachability:
             # -------------------------------------------------
             # handle Ret node
             elif isinstance(node, pysvf.RetICFGNode):
-                # don't handle external returns
                 callnode = node.getCallICFGNode()
-                if callnode and pysvf.isExtCall(callnode.getCalledFunction()):
+                callee = callnode.getCalledFunction() if callnode else None
+                if callee is None or pysvf.isExtCall(callee):
+                    # No frame was pushed for an external call, nor for an indirect call
+                    # whose target is unknown, so there is nothing to pop -- but execution
+                    # does continue past it. Abandoning the path here made everything
+                    # downstream of any external call (malloc, printf, a nondet stub)
+                    # unreachable.
+                    for e in node.getOutEdges():
+                        self.worklist.append((e.getDstNode(), stack))
                     continue
                 # pop stack
                 if stack:
@@ -69,8 +76,11 @@ class CFLreachability:
                 else:
                     continue # empty stack, skip
 
-                current_name = node.getFun().getName()
-                if top != current_name:
+                # The name pushed at the call site is the *callee*; node.getFun()
+                # is the function containing the return site, i.e. the caller. The
+                # stack top must be matched against the callee.
+                callee_name = callee.getName()
+                if top != callee_name:
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
 
