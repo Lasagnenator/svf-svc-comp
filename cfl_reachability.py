@@ -3,6 +3,7 @@ class CFLreachability:
     def __init__(self, pag: pysvf.SVFIR):
         self.svfir = pag
         self.icfg = pag.getICFG()
+        # worklist structure: (current ICFG node, current call context)
         self.worklist = []
         self.visited = set()
         self.call_stack = []
@@ -21,7 +22,7 @@ class CFLreachability:
         while self.worklist:
             # get the first function from worklist
             node, stack = self.worklist.pop(0)
-            state_key = (node.getFun().getName(), stack)
+            state_key = (node.getId(), stack)
             # skip if already visited
             if state_key in self.visited:
                 continue
@@ -32,10 +33,9 @@ class CFLreachability:
                 callee = node.getCalledFunction()
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
-            if isinstance(node, pysvf.CallICFGNode):
-            # -------------------------------------------------
-            # handle Call node
-                callee = node.getCalledFunction()
+                    continue
+                # -------------------------------------------------
+                # handle Call node
                 # handle internal calls
                 # we don't need to handle external calls
                 if callee and not pysvf.isExtCall(callee):
@@ -48,8 +48,8 @@ class CFLreachability:
                     self.worklist.append((entry, new_stack))
 
                 # also follow normal CFG to ret node
-                ret_node = node.getRetICFGNode()
-                self.worklist.append((ret_node, stack))  # will pop when handle ret
+                # ret_node = node.getRetICFGNode()
+                # self.worklist.append((ret_node, stack))  # will pop when handle ret
                 continue
             # -------------------------------------------------
             # handle Ret node
@@ -63,9 +63,8 @@ class CFLreachability:
                     top = stack[-1]   
                 else:
                     continue # empty stack, skip
-
-                current_name = node.getFun().getName()
-                if top != current_name:
+                callee = callnode.getCalledFunction() if callnode else None
+                if callee and top != callee.getName():
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
 
