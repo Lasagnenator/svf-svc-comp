@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <key attr.name="isEntryNode" attr.type="boolean" for="node" id="entry">
+  <default>false</default>
+ </key>
+ <key attr.name="isViolationNode" attr.type="boolean" for="node" id="violation">
+  <default>false</default>
+ </key>
+ <key attr.name="witness-type" attr.type="string" for="graph" id="witness-type"/>
+ <key attr.name="sourcecodelang" attr.type="string" for="graph" id="sourcecodelang"/>
+ <key attr.name="producer" attr.type="string" for="graph" id="producer"/>
+ <key attr.name="specification" attr.type="string" for="graph" id="specification"/>
+ <key attr.name="programfile" attr.type="string" for="graph" id="programfile"/>
+ <key attr.name="programhash" attr.type="string" for="graph" id="programhash"/>
+ <key attr.name="architecture" attr.type="string" for="graph" id="architecture"/>
+ <key attr.name="creationtime" attr.type="string" for="graph" id="creationtime"/>
+ <graph edgedefault="directed">
+  <data key="witness-type">violation_witness</data>
+  <data key="sourcecodelang">C</data>
+  <data key="producer">SVF-SVC 1.8</data>
+  <data key="specification">CHECK( init(main()), LTL(G valid-free) )
+CHECK( init(main()), LTL(G valid-deref) )
+CHECK( init(main()), LTL(G valid-memtrack) )</data>
+  <data key="programfile">tests/mem-safety/branch_free.c</data>
+  <data key="programhash">cc39e39e8ad282ba42d16ad2aeb39d4ff15f1d3bcfdcce8ca7cc43d8eea90685</data>
+  <data key="architecture">64bit</data>
+  <data key="creationtime">2026-09-17T03:21:56+00:00</data>
+  <node id="node0">
+   <data key="entry">true</data>
+   <data key="violation">true</data>
+  </node>
+ </graph>
+</graphml>

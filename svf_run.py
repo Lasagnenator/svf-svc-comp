@@ -124,6 +124,36 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
         else:
             print("OVERFLOW Correct")
             correctness = "Correct"
+            
+    elif prop_file_name == 'valid-memsafety.prp':
+        # This property file bundles valid-deref, valid-free, and valid-memtrack.
+        # We check our arrays in order and fail if any of them detected a violation.
+        
+        if len(ae.results.get("nulldereference", [])) > 0:
+            print("MEMSAFETY (valid-deref) Incorrect")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
+            print("MEMSAFETY (valid-free) Incorrect")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("memoryleak", [])) > 0:
+            print("MEMSAFETY (valid-memtrack) Incorrect")
+            correctness = "Incorrect"
+            
+        else:
+            print("MEMSAFETY Correct")
+            correctness = "Correct"
+
+    elif prop_file_name == 'valid-memcleanup.prp':
+        # Memcleanup requires all memory to be explicitly freed before exit.
+        # Our memory leak detector at the end of main() handles this perfectly.
+        if len(ae.results.get("memoryleak", [])) > 0:
+            print("MEMCLEANUP Incorrect")
+            correctness = "Incorrect"
+        else:
+            print("MEMCLEANUP Correct")
+            correctness = "Correct"
 
     else:
         # Unsupported category.
