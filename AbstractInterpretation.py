@@ -427,6 +427,10 @@ class AbstractExecution:
         self.visited = set()
         # Nodes handleICFGNode visited and proved infeasible.
         self.infeasible_nodes = set()
+        # Nodes that reached the merge with no predecessor state.
+        self.orphan_nodes = set()
+        # Stores unreachable nodes -> nodes proven dead
+        self.unreachable_nodes = set()
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -666,9 +670,87 @@ class AbstractExecution:
         "reach_error", "__VERIFIER_error",
     }
 
+    def computeUnreachableNodes(self):
+        """Nodes with no live path in, i.e. every edge reaching them was pruned.
+
+        Seeded with the nodes the merge proved infeasible and pushed forward: a successor
+        joins the set once all of its own in-edges come from it. Nodes that already hold a
+        state are reachable by construction and are never added.
+        """
+        unreachable = {node for node in self.infeasible_nodes
+                       if node not in self.post_abs_trace}
+        # A node with no in-edges can only be entered where the walk starts. Anything else
+        # is unreachable by construction. Seeded, since no predecessor leads to them.
+        for node in self.icfg.getNodes():
+            if node in self.post_abs_trace or node in unreachable:
+                continue
+            if isinstance(node, (pysvf.FunEntryICFGNode, pysvf.GlobalICFGNode)):
+                continue
+            if not list(node.getInEdges()):
+                unreachable.add(node)
+        worklist = list(unreachable)
+        while worklist:
+            node = worklist.pop()
+            successors = [edge.getDstNode() for edge in node.getOutEdges()]
+            if isinstance(node, pysvf.CallICFGNode):
+                successors.append(node.getRetICFGNode())
+            for dst in successors:
+                if dst is None or dst in self.post_abs_trace or dst in unreachable:
+                    continue
+                if self.isUnreachableGiven(dst, unreachable):
+                    unreachable.add(dst)
+                    worklist.append(dst)
+        return unreachable
+
+    def isUnreachableGiven(self, node: pysvf.ICFGNode, unreachable) -> bool:
+        """True when every way of arriving at `node` is already known unreachable."""
+        if isinstance(node, pysvf.RetICFGNode):
+            call = node.getCallICFGNode()
+            if call is not None and call in unreachable:
+                return True
+        in_edges = list(node.getInEdges())
+        return bool(in_edges) and all(e.getSrcNode() in unreachable for e in in_edges)
+
+    def finaliseGaps(self):
+        """Turn the deferred orphans into gaps, keeping only those that are not proofs."""
+        self.unreachable_nodes = self.computeUnreachableNodes()
+        for block in self.orphan_nodes:
+            if block in self.post_abs_trace:
+                continue  # a later iteration gave it a state after all
+            pending = [edge.getSrcNode() for edge in block.getInEdges()
+                       if edge.getSrcNode() not in self.post_abs_trace
+                       and edge.getSrcNode() not in self.unreachable_nodes]
+            if pending:
+                self.recordGap(f"node {block.getId()} has {len(pending)} "
+                               f"unanalysed predecessor(s)")
+
     def recordGap(self, reason: str):
-        """Record that the analysis gave up; safety may only be claimed when nothing was recorded."""
+        """Record that the analysis gave up"""
         self.results["incomplete"].append(reason)
+
+    def markCallNeverReturns(self, node: pysvf.CallICFGNode):
+        """The callee cannot return, so the code after the call is unreachable, not missing."""
+        ret = node.getRetICFGNode()
+        if ret is not None and ret not in self.post_abs_trace:
+            self.infeasible_nodes.add(ret)
+
+    def resumeAfterUnanalysedCall(self, node: pysvf.CallICFGNode):
+        """Carry the caller's state across a call whose body was not walked.
+
+        Without this the return node has no analysed predecessor and is reported as a
+        dropped path on top of the gap the call itself already recorded. The callee's
+        effects are unknown, so the returned value is havoced.
+        """
+        ret = node.getRetICFGNode()
+        if ret is None or node not in self.post_abs_trace:
+            return
+        state = self.post_abs_trace[node].clone()
+        actual_ret = ret.getActualRet()
+        if actual_ret is not None:
+            state[actual_ret.getId()] = AbstractValue(IntervalValue.top())
+        self.pre_abs_trace[ret] = state
+        self.post_abs_trace[ret] = state
+        self.infeasible_nodes.discard(ret)
 
     def handleCallSite(self, node: pysvf.CallICFGNode):
         fun_name = node.getCalledFunction().getName()
@@ -681,10 +763,17 @@ class AbstractExecution:
         elif fun_name == "mem_insert" or fun_name == "str_insert": #isExternalCallForAssignment
             self.updateStateOnExtCall(node)
         elif pysvf.isExtCall(node.getCalledFunction()):
-            if fun_name not in self.SAFE_EXTERNALS:
+            # The body is never walked, so the callee's exit gets no state,
+            # deal with it here.
+            if fun_name in self.SAFE_EXTERNALS:
+                # These never return, so the code after the call is dead.
+                self.markCallNeverReturns(node)
+            else:
                 self.recordGap(f"external call not modelled: {fun_name}")
+                self.resumeAfterUnanalysedCall(node)
         elif node.getCalledFunction() in self.recursive_funs:
             self.recordGap(f"recursive function body not analysed: {fun_name}")
+            self.resumeAfterUnanalysedCall(node)
             return
         else:
             self.handleFunction(self.svfir.getICFG().getFunEntryICFGNode(node.getCalledFunction()))
@@ -820,9 +909,9 @@ class AbstractExecution:
         if in_edge_num == 0:
             print(f"Error: No predecessors for block {block.getId()}")
             if unanalysed_preds:
-                # A never-analysed predecessor is not proof this node is unreachable.
-                self.recordGap(f"node {block.getId()} has {unanalysed_preds} "
-                               f"unanalysed predecessor(s)")
+                # Defer: a predecessor with no state may still be one every path into
+                # which was pruned
+                self.orphan_nodes.add(block)
             return (False, None)
         return (True, abstract_state)
 
@@ -1052,6 +1141,7 @@ class AbstractExecution:
             self.handleFunction(self.icfg.getFunEntryICFGNode(main_fun))
         else:
             assert False, "Main function not found"
+        self.finaliseGaps()
         self.ensureAllAssertsValidated()
         self.buf_overflow_helper.printReport()
 
