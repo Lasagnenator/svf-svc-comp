@@ -73,7 +73,6 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
         'input_files': input_files,
         'input_file_hashes': hashes,
         'specification': specification,
-        # TODO: take from --bits once the entrypoint honours it
         'data_model': data_model,
         'language': 'C'
     }
