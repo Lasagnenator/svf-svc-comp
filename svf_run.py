@@ -8,7 +8,6 @@ import generate_witness
 
 import nondet
 from util import *
-import witness_output
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
 
@@ -20,25 +19,18 @@ def main():
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--witness", default=None, help="witness output")
-    parser.add_argument("--witness-format", default="1.0", choices=["1.0", "2.0"], help="witness version")
+    parser.add_argument("--witness", default="witness.yml", help="witness output")
+    parser.add_argument("--witness-format", default="2.0", choices=["2.0", "2.1", "2.2"], help="witness format version")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
     log(f"Extra unknown arguments: {extra}")
 
-    # format 2.0+ only accept .yml file
-    if args.witness is None:
-        args.witness = "witness.yml" if args.witness_format == "2.0" else "witness.graphml"
-    if args.witness_format == "2.0" and not args.witness.endswith(".yml"):
-        log(f"Warning: format 2.0 requires .yml, ignoring {args.witness}")
-        args.witness = "witness.yml"
-
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="1.0"):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0"):
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -139,22 +131,19 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         print("Unknown")
         correctness = "Unknown"
 
-    ### TODO: neither path exports invariants yet (2.0 passes an empty invariant set)
-    if witness_format == "2.0":
+    ### TODO: invariants are not exported yet (an empty invariant set is passed)
         if "Correct" in correctness and "Incorrect" not in correctness:
             with open(prop_file_path) as f:
                 spec = f.read().strip()
-            generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
+            generate_witness.write_witness(
+                [], [input_file_path], spec, witness_file_path, witness_format,
+                'ILP32' if bits == "32" else 'LP64')
         else:
             # violation_sequence not implemented yet; produce nothing
-            log(f"No 2.0 witness for result: {correctness}")
-        generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
-    else:
-        witness_output.generate_witness(
-            correctness, input_file_path, prop_file_path, witness_file_path, bits)
+            log(f"No witness for result: {correctness}")
 
-    working_file.close()
-    pysvf.releasePAG()
+        working_file.close()
+        pysvf.releasePAG()
 
 
 if __name__ == "__main__":
