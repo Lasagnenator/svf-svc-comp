@@ -130,29 +130,32 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
         # We check our arrays in order and fail if any of them detected a violation.
         
         if len(ae.results.get("nulldereference", [])) > 0:
-            print("MEMSAFETY (valid-deref) Incorrect")
+            print("MEMORY Incorrect(valid-deref)")
             correctness = "Incorrect"
             
         elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
-            print("MEMSAFETY (valid-free) Incorrect")
+            print("MEMORY Incorrect(valid-free)")
             correctness = "Incorrect"
             
         elif len(ae.results.get("memoryleak", [])) > 0:
-            print("MEMSAFETY (valid-memtrack) Incorrect")
+            print("MEMORY Incorrect(valid-memtrack)")
+            correctness = "Incorrect"
+        elif len(ae.results.get("badfree", [])) > 0:
+            print("MEMORY Incorrect(valid-free)")
             correctness = "Incorrect"
             
         else:
-            print("MEMSAFETY Correct")
+            print("MEMORY Correct")
             correctness = "Correct"
 
     elif prop_file_name == 'valid-memcleanup.prp':
         # Memcleanup requires all memory to be explicitly freed before exit.
         # Our memory leak detector at the end of main() handles this perfectly.
         if len(ae.results.get("memoryleak", [])) > 0:
-            print("MEMCLEANUP Incorrect")
+            print("CLEANUP Incorrect")
             correctness = "Incorrect"
         else:
-            print("MEMCLEANUP Correct")
+            print("CLEANUP Correct")
             correctness = "Correct"
 
     else:
