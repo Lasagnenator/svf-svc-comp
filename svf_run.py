@@ -132,18 +132,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         correctness = "Unknown"
 
     ### TODO: invariants are not exported yet (an empty invariant set is passed)
-        if "Correct" in correctness and "Incorrect" not in correctness:
-            with open(prop_file_path) as f:
-                spec = f.read().strip()
-            generate_witness.write_witness(
-                [], [input_file_path], spec, witness_file_path, witness_format,
-                'ILP32' if bits == "32" else 'LP64')
-        else:
-            # violation_sequence not implemented yet; produce nothing
-            log(f"No witness for result: {correctness}")
+    if "Correct" in correctness and "Incorrect" not in correctness:
+        with open(prop_file_path) as f:
+            spec = f.read().strip()
+        generate_witness.write_witness(
+            [], [input_file_path], spec, witness_file_path, witness_format,
+            'ILP32' if bits == "32" else 'LP64')
+    else:
+        # violation_sequence not implemented yet; produce nothing
+        log(f"No witness for result: {correctness}")
 
-        working_file.close()
-        pysvf.releasePAG()
+    working_file.close()
+    pysvf.releasePAG()
 
 
 if __name__ == "__main__":
