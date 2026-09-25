@@ -58,6 +58,8 @@ def _in_scope(declaration, head_location):
 def _conjuncts_for(name, interval):
     """Render one variable's interval as C comparisons."""
     lower, upper = _finite_bounds(interval)
+    if lower is not None and lower == upper:
+        return [f"({name} == {lower})"]
     clauses = []
     if lower is not None:
         clauses.append(f"({name} >= {lower})")
