@@ -12,7 +12,6 @@ runtime_files=(
     nondet.py
     svf_run.py
     util.py
-    witness_output.py
     LICENSE.TXT
     requirements.txt
     smoketest.sh
