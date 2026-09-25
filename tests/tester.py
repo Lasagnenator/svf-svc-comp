@@ -557,7 +557,7 @@ def run_task(task, args, logs_dir):
     yaml_dir = task.yaml_path.parent
     input_paths = [str((yaml_dir / item).resolve()) for item in task.input_files]
     property_path = str((yaml_dir / task.property_file).resolve())
-    witness_path = logs_dir / safe_log_name(task).replace(".log", ".witness.graphml")
+    witness_path = logs_dir / safe_log_name(task).replace(".log", ".witness.yml")
     command = [sys.executable, str(args.svf_root / "svf_run.py")]
     command.extend(input_paths)
     command.extend(["--prop", property_path, "--witness", str(witness_path),

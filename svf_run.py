@@ -5,6 +5,7 @@ import argparse
 import subprocess
 import tempfile
 import generate_witness
+import invariants
 
 import nondet
 from util import *
@@ -39,6 +40,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
         buffer.write(c_code)
         buffer.write(nondet_defs)
+
+    # Anything SVF reports past this line comes from the appended nondet definitions
+    # rather than the input, so invariants there must not reach the witness.
+    input_line_count = len(c_code.splitlines())
 
     buffer.flush()
 
@@ -131,12 +136,14 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         print("Unknown")
         correctness = "Unknown"
 
-    ### TODO: invariants are not exported yet (an empty invariant set is passed)
     if "Correct" in correctness and "Incorrect" not in correctness:
         with open(prop_file_path) as f:
             spec = f.read().strip()
+        loop_invariants = invariants.extract_loop_invariants(
+            ae, pag, input_file_path, input_line_count)
+        log(f"Exported {len(loop_invariants)} loop invariant(s).")
         generate_witness.write_witness(
-            [], [input_file_path], spec, witness_file_path, witness_format,
+            loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
     else:
         # violation_sequence not implemented yet; produce nothing
