@@ -9,12 +9,13 @@ archive="$dist/svf-svc.zip"
 runtime_files=(
     AbstractInterpretation.py
     cfl_reachability.py
+    generate_witness.py
+    invariants.py
     nondet.py
     svf_run.py
     util.py
     LICENSE.TXT
     README.MD
-    requirements.txt
     smoketest.sh
     tests/basic_reach.c
     tests/cfl_test2.c
