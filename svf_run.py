@@ -5,10 +5,10 @@ import argparse
 import subprocess
 import tempfile
 import generate_witness
+import invariants
 
 import nondet
 from util import *
-import witness_output
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
 
@@ -24,8 +24,8 @@ def main():
                         help="report a violation whenever the abstract state says reach_error "
                              "is feasible. Off by default: abstract feasibility is not proof of "
                              "a concrete path, and the witness carries no trace to confirm it.")
-    parser.add_argument("--witness", default=None, help="witness output")
-    parser.add_argument("--witness-format", default="1.0", choices=["1.0", "2.0"], help="witness version")
+    parser.add_argument("--witness", default="witness.yml", help="witness output")
+    parser.add_argument("--witness-format", default="2.0", choices=["2.0", "2.1", "2.2"], help="witness format version")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
@@ -42,7 +42,8 @@ def main():
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="1.0", claim_violations=False):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
+
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -51,6 +52,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
         buffer.write(c_code)
         buffer.write(nondet_defs)
+
+    # Anything SVF reports past this line comes from the appended nondet definitions
+    # rather than the input, so invariants there must not reach the witness.
+    input_line_count = len(c_code.splitlines())
 
     buffer.flush()
 
@@ -62,7 +67,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
     # SV-COMP tasks predate clang 15; demote these errors and raise the bracket limit.
-    command = ["clang", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
+    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
                "-Wno-error=int-conversion",
                "-Wno-error=implicit-function-declaration",
                "-Wno-error=incompatible-function-pointer-types",
@@ -186,18 +191,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         print("Unknown")
         correctness = "Unknown"
 
-    ### TODO: neither path exports invariants yet (2.0 passes an empty invariant set)
-    if witness_format == "2.0":
-        if "Correct" in correctness and "Incorrect" not in correctness:
-            with open(prop_file_path) as f:
-                spec = f.read().strip()
-            generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
-        else:
-            # violation_sequence not implemented yet; produce nothing
-            log(f"No 2.0 witness for result: {correctness}")
+    if "Correct" in correctness and "Incorrect" not in correctness:
+        with open(prop_file_path) as f:
+            spec = f.read().strip()
+        loop_invariants = invariants.extract_loop_invariants(
+            ae, pag, input_file_path, input_line_count)
+        log(f"Exported {len(loop_invariants)} loop invariant(s).")
+        generate_witness.write_witness(
+            loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
+            'ILP32' if bits == "32" else 'LP64')
     else:
-        witness_output.generate_witness(
-            correctness, input_file_path, prop_file_path, witness_file_path, bits)
+        # violation_sequence not implemented yet; produce nothing
+        log(f"No witness for result: {correctness}")
 
     working_file.close()
     pysvf.releasePAG()

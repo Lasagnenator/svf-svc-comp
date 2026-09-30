@@ -39,7 +39,7 @@ Sample witness
 
 """
 
-def write_witness(invariants: list, input_files: list, specification: str, output_path: str) -> None:
+def write_witness(invariants: list, input_files: list, specification: str, output_path: str, format_version: str = '2.0', data_model: str = 'LP64') -> None:
 
     hashes = {}
     for file in input_files:
@@ -55,9 +55,9 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
     yaml_list.append(dict())
     yaml_list[-1]['entry_type'] = 'invariant_set'
     yaml_list[-1]['metadata'] = {
-        'format_version': '2.0',
+        'format_version': format_version,
         'uuid': str(uuid.uuid4()),
-        'creation_time': datetime.datetime.now().isoformat()
+        'creation_time': datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     }
 
     yaml_list[-1]['metadata']['producer'] = {
@@ -73,8 +73,7 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
         'input_files': input_files,
         'input_file_hashes': hashes,
         'specification': specification,
-        # TODO: take from --bits once the entrypoint honours it
-        'data_model': 'ILP32', # can be ILP32 or LP64
+        'data_model': data_model,
         'language': 'C'
     }
     yaml_list[-1]['content'] = []
@@ -114,4 +113,4 @@ if __name__ == "__main__":
 
   input_files = ['multivar_1-1.c']
   specification = 'CHECK( init(main()), LTL(G ! call(reach_error())) )'
-  write_witness(invariants, input_files, specification, 'witness.yml')
+  write_witness(invariants, input_files, specification, 'witness.yml', '2.0')
