@@ -431,6 +431,8 @@ class AbstractExecution:
         self.orphan_nodes = set()
         # Stores unreachable nodes -> nodes proven dead
         self.unreachable_nodes = set()
+        # Ret node -> state carried over from its call node when the function body is not analysed.
+        self.skipped_states = {}
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -670,9 +672,25 @@ class AbstractExecution:
         "reach_error", "__VERIFIER_error",
     }
 
+    # Memory functions, modelled assuming the program is memory safe
+    MEMORY_EXTERNALS = ("malloc", "llvm.stacksave", "llvm.stackrestore", "llvm.memcpy")
+
+    # stacksave and stackrestore have suffix, matched by prefix
+    # to cover overload suffixes (.p0, .i32).
+    def isMemoryExternal(self, fun_name: str) -> bool:
+        return any(fun_name == name or fun_name.startswith(name + ".")
+                   for name in self.MEMORY_EXTERNALS)
+
+    def handleMemoryCall(self, node: pysvf.CallICFGNode, fun_name: str):
+        # Check to see if its been broken down by svf simple for now
+        # Record a gap if we couldnt find a lowered version
+        if fun_name.startswith("llvm.memcpy") and not any(
+                isinstance(stmt, pysvf.StoreStmt) for stmt in node.getSVFStmts()):
+            self.recordGap(f"memcpy not lowered by SVF: {fun_name}")
+            self.resumeAfterUnanalysedCall(node)
+
     def computeUnreachableNodes(self):
         """Nodes with no live path in, i.e. every edge reaching them was pruned.
-
         Seeded with the nodes the merge proved infeasible and pushed forward: a successor
         joins the set once all of its own in-edges come from it. Nodes that already hold a
         state are reachable by construction and are never added.
@@ -740,6 +758,9 @@ class AbstractExecution:
         Without this the return node has no analysed predecessor and is reported as a
         dropped path on top of the gap the call itself already recorded. The callee's
         effects are unknown, so the returned value is havoced.
+
+        The state goes to the ret node's merge, not its trace: a pre-filled
+        state would look like a fixpoint and stop the walk.
         """
         ret = node.getRetICFGNode()
         if ret is None or node not in self.post_abs_trace:
@@ -748,9 +769,7 @@ class AbstractExecution:
         actual_ret = ret.getActualRet()
         if actual_ret is not None:
             state[actual_ret.getId()] = AbstractValue(IntervalValue.top())
-        self.pre_abs_trace[ret] = state
-        self.post_abs_trace[ret] = state
-        self.infeasible_nodes.discard(ret)
+        self.skipped_states[ret] = state
 
     def handleCallSite(self, node: pysvf.CallICFGNode):
         fun_name = node.getCalledFunction().getName()
@@ -768,6 +787,8 @@ class AbstractExecution:
             if fun_name in self.SAFE_EXTERNALS:
                 # These never return, so the code after the call is dead.
                 self.markCallNeverReturns(node)
+            elif self.isMemoryExternal(fun_name):
+                self.handleMemoryCall(node, fun_name)
             else:
                 self.recordGap(f"external call not modelled: {fun_name}")
                 self.resumeAfterUnanalysedCall(node)
@@ -906,6 +927,10 @@ class AbstractExecution:
                     in_edge_num += 1
             elif edge.getSrcNode() not in self.infeasible_nodes:
                 unanalysed_preds += 1
+        # A call whose body was not walked acts as an extra predecessor of its ret node.
+        if block in self.skipped_states:
+            abstract_state.joinWith(self.skipped_states[block])
+            in_edge_num += 1
         if in_edge_num == 0:
             print(f"Error: No predecessors for block {block.getId()}")
             if unanalysed_preds:
@@ -1211,6 +1236,9 @@ class AbstractExecution:
             if obj.isConstDataObjVar() or obj.isConstantArray() or obj.isConstantStruct():
                 if isinstance(objVar, pysvf.ConstIntObjVar):
                     numeral = objVar.getSExtValue()
+                    # 1 bit int fix boolean
+                    if numeral == -1 and objVar.getZExtValue() == 1:
+                        numeral = 1
                     return IntervalValue(numeral, numeral)
 
                 elif isinstance(objVar, pysvf.ConstFPObjVar):
@@ -1456,9 +1484,42 @@ class AbstractExecution:
         lhs = store.getLHSVarID()
         rhs = store.getRHSVarID()
         if abstract_state.getVar(lhs).isAddr():
+            value = abstract_state[rhs]
+            if self.needsWeakUpdate(abstract_state, abstract_state[lhs].getAddrs()):
+                value = value.clone()
+                for addr in abstract_state[lhs].getAddrs():
+                    if abstract_state.getIDFromAddr(addr) in abstract_state.getLocToVal():
+                        value.join_with(abstract_state.load(addr))
             self.ae_manager.updateAbsState(node, abstract_state)
-            self.ae_manager.storeValue(store.getLHSVar(), abstract_state[rhs], node)
+            self.ae_manager.storeValue(store.getLHSVar(), value, node)
             self.post_abs_trace[node] = self.ae_manager.getAbsState(node).clone()
+
+    def needsWeakUpdate(self, abstract_state, addrs) -> bool:
+        """ Update when exact location is unknown: adds its value to what the 
+        state already holds, instead of replacing it
+            Example
+            int a[10];      // one cell for the whole array
+            a[0] = 7;
+            a[i] = 0;       // strong: a is {0}, so a[0] == 7 looks impossible
+                            // weak:   a is [0, 7], which is correct
+
+        A weak update is needed when:
+        - the pointer has several possible targets, so only one of them is written;
+        - the object is on the heap: one object per malloc site stands for every block
+          that site returns (e.g. every node of a list built in a loop);
+        - the object is field-insensitive, so all its elements share one cell;
+        - the object has no constant size (a VLA), so it is also kept as one cell.
+        """
+        if len(addrs) > 1:
+            return True
+        for addr in addrs:
+            if abstract_state.isNullMem(addr) or abstract_state.isBlackHoleObjAddr(addr):
+                continue
+            base = self.svfir.getBaseObject(abstract_state.getIDFromAddr(addr))
+            if base is not None and (base.isHeap() or base.isFieldInsensitive()
+                                     or not base.isConstantByteSize()):
+                return True
+        return False
 
     #TODO: your code starts from here
     # Find the comparison predicates in "class BinaryOPStmt:OpCode" under SVF/svf/include/SVFIR/SVFStatements.h

@@ -195,7 +195,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         else:
             # violation_sequence not implemented yet; produce nothing
             log(f"No 2.0 witness for result: {correctness}")
-        generate_witness.write_witness([], [input_file_path], spec, witness_file_path)
     else:
         witness_output.generate_witness(
             correctness, input_file_path, prop_file_path, witness_file_path, bits)
