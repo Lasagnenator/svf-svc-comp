@@ -167,10 +167,11 @@ class TesterUnitTests(unittest.TestCase):
         self.assertEqual(tagged[0], "false")
         self.assertEqual(tagged[6], "valid-deref")
 
-    @mock.patch("tests.tester.subprocess.run")
+    @mock.patch("tests.tester.subprocess.Popen")
     def test_false_answer_runs_configured_validator(self, run):
         task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
-        run.return_value = SimpleNamespace(returncode=0, stdout="witness confirmed", stderr="")
+        run.return_value.returncode = 0
+        run.return_value.communicate.return_value = ("witness confirmed", "")
         args = SimpleNamespace(validation_results={},
                                validator_command="validate {witness} {input}",
                                validation_wall_limit=5)
@@ -182,7 +183,7 @@ class TesterUnitTests(unittest.TestCase):
         self.assertEqual(validation, "correct")
         run.assert_called_once()
 
-    @mock.patch("tests.tester.subprocess.run")
+    @mock.patch("tests.tester.subprocess.Popen")
     def test_true_answer_without_witness_requirement_skips_validator(self, run):
         task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
         args = SimpleNamespace(validation_results={},
@@ -204,6 +205,53 @@ class TesterUnitTests(unittest.TestCase):
         ]
         summary = tester.summarize(results, 2, [first, second], 0)
         self.assertEqual(summary["normalized_score"], 3)
+
+    @mock.patch("tests.tester.subprocess.Popen")
+    def test_validator_checks_optional_witnesses_and_preserves_spaces(self, run):
+        run.return_value.returncode = 0
+        run.return_value.communicate.return_value = ("confirmed", "")
+        args = SimpleNamespace(validator_command="validate {witness} {input} {property} {bits}")
+        for category in (None, "C.unreach-call.Arrays"):
+            task = self.categorised(self.make_task("safe"), category)
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
+                witness = Path(directory) / "witness with spaces.yml"
+                witness.write_text("[]")
+                self.assertEqual(tester.validate_witness(
+                    task, "true", args, witness, ["input with spaces.c"], "property.prp"), "correct")
+                self.assertEqual(run.call_args.args[0], [
+                    "validate", str(witness), "input with spaces.c", "property.prp", "64"])
+                run.return_value.communicate.assert_called_with(timeout=300)
+                self.assertIn("confirmed", witness.with_suffix(".validation.log").read_text())
+
+    @mock.patch("tests.tester.os.killpg")
+    @mock.patch("tests.tester.subprocess.Popen")
+    def test_validator_timeout_kills_process_group(self, run, killpg):
+        run.return_value.pid = 123
+        run.return_value.returncode = 0
+        run.return_value.communicate.side_effect = [
+            subprocess.TimeoutExpired("validate", 90), ("", "")]
+        args = SimpleNamespace(validator_command="validate {witness}")
+        with tempfile.TemporaryDirectory() as directory:
+            witness = Path(directory) / "witness.yml"
+            witness.write_text("[]")
+            validation = tester.validate_witness(
+                self.make_task("unsafe"), "false", args, witness, ["input.c"], "property.prp")
+            self.assertEqual(validation, "unconfirmed")
+            self.assertIn("timeout after 90s", witness.with_suffix(".validation.log").read_text())
+        killpg.assert_called_once_with(123, tester.signal.SIGKILL)
+        self.assertEqual(run.return_value.communicate.call_args_list[0], mock.call(timeout=90))
+
+    def test_summary_reports_fraction_of_generated_witnesses(self):
+        task = self.make_task("safe")
+        results = [SimpleNamespace(
+            category=None, score=2, answer="true", expected=True, classification="result",
+            witness_path=path, witness_validation=status)
+            for path, status in (("one.yml", "correct"), ("two.yml", "unconfirmed"),
+                                 (None, "not-required"))]
+        summary = tester.summarize(results, 3, [task] * 3, 0)
+        self.assertEqual(summary["witness_validation"], {
+            "generated": 2, "confirmed": 1, "confirmation_fraction": 0.5,
+        })
 
 
 class TesterIntegrationTests(unittest.TestCase):

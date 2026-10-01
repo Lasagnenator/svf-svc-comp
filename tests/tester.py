@@ -497,12 +497,14 @@ def witness_required(task, answer):
 
 
 def validate_witness(task, answer, args, witness_path, input_paths, property_path):
-    if not witness_required(task, answer):
-        return "not-required"
+    if answer not in {"true", "false"}:
+        return "not-run"
     validation_results = getattr(args, "validation_results", {})
     if task.run_id in validation_results:
         return validation_results[task.run_id]
     template = getattr(args, "validator_command", None)
+    if not witness_required(task, answer) and not (template and witness_path.is_file()):
+        return "not-required"
     if not template or not witness_path.is_file():
         return "unconfirmed"
     values = {
@@ -511,15 +513,43 @@ def validate_witness(task, answer, args, witness_path, input_paths, property_pat
         "property": property_path,
         "bits": "32" if task.data_model == "ILP32" else "64",
     }
+    log_path = witness_path.with_suffix(".validation.log")
+    process = None
+    timed_out = False
+    wall_limit = getattr(args, "validation_wall_limit", None) or (90 if answer == "false" else 300)
     try:
-        command = shlex.split(template.format(**values))
-        process = subprocess.run(
+        command = [part.format(**values) for part in shlex.split(template)]
+        process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace", timeout=getattr(args, "validation_wall_limit", 300),
+            text=True, errors="replace", cwd=getattr(args, "svf_root", None),
+            start_new_session=True,
         )
-    except (KeyError, OSError, subprocess.TimeoutExpired, ValueError):
+        try:
+            stdout, stderr = process.communicate(timeout=wall_limit)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            stderr += f"\nValidator wall timeout after {wall_limit}s\n"
+        log_path.write_text(
+            f"command: {shlex.join(command)}\nreturn_code: {process.returncode}\n"
+            f"wall_limit: {wall_limit}\n\n===== STDOUT =====\n{stdout}"
+            f"\n===== STDERR =====\n{stderr}", errors="replace")
+    except KeyboardInterrupt:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        raise
+    except (KeyError, OSError, ValueError) as error:
+        log_path.write_text(f"Validator failed: {error}\n", errors="replace")
         return "unconfirmed"
-    return "correct" if process.returncode == 0 else "unconfirmed"
+    return "correct" if not timed_out and process.returncode == 0 else "unconfirmed"
 
 
 def diagnostic_tail(text, lines=12):
@@ -662,6 +692,8 @@ def summarize(results, population, selected, elapsed, interrupted=False):
     average_size = sum(entry["tasks"] for entry in populated) / len(populated) if populated else 0
     normalized_score = average_size * sum(
         entry["score"] / entry["tasks"] for entry in populated) if populated else None
+    witnesses = [result for result in results if getattr(result, "witness_path", None)]
+    confirmed = sum(result.witness_validation == "correct" for result in witnesses)
     return {
         "schema_version": 1,
         "provisional": True,
@@ -675,6 +707,11 @@ def summarize(results, population, selected, elapsed, interrupted=False):
         "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
+        "witness_validation": {
+            "generated": len(witnesses),
+            "confirmed": confirmed,
+            "confirmation_fraction": confirmed / len(witnesses) if witnesses else None,
+        },
         "wall_seconds": elapsed,
         "interrupted": interrupted,
     }
@@ -735,8 +772,8 @@ def build_parser():
                         help="JSON object mapping run IDs to correct or unconfirmed witness status")
     parser.add_argument("--validator-command",
                         help="validator command template; supports {witness}, {input}, {property}, {bits}")
-    parser.add_argument("--validation-wall-limit", type=int, default=300,
-                        help="validator wall-time limit in seconds (default: 300)")
+    parser.add_argument("--validation-wall-limit", type=int,
+                        help="override validator wall seconds (default: 300 correctness, 90 violation)")
     parser.add_argument("--verbose", "-v", action="count", default=0)
     return parser
 
@@ -765,7 +802,7 @@ def main(argv=None):
         build_parser().error(f"svf_run.py not found under: {args.svf_root}")
     if min(args.cpu_limit, args.wall_limit, args.memory_limit_mib) <= 0:
         build_parser().error("resource limits must be positive")
-    if args.validation_wall_limit <= 0:
+    if args.validation_wall_limit is not None and args.validation_wall_limit <= 0:
         build_parser().error("validation wall limit must be positive")
     try:
         args.validation_results = load_validation_results(args.validation_results)
@@ -884,6 +921,8 @@ def main(argv=None):
     if summary["normalized_score"] is not None:
         print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))
+    validation = summary["witness_validation"]
+    print(f"Witnesses confirmed: {validation['confirmed']}/{validation['generated']}")
     # Distinguish harness failure from analyser weakness so CI can gate on the exit code.
     start_failures = sum(result.termination_reason == "start_failure" for result in results)
     if start_failures:
