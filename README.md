@@ -66,7 +66,7 @@ A running list of things to work on:
 * TODO: There's scripts for witness gen (yaml and graphml), now have to make our run of SVF output info to provide to those scripts, to generate the witnesses
 * TODO: Implement the actual checking for conditions/categories like reachability, overflow, memory errors, etc (and then provide those to witness gen)
           (reachability is now done)   
-* TODO: Implement testing using CPAChecker to accept a witness and certify whether it is accurate
+* Witness confirmation is available through CPAchecker in the local benchmark runner (see below).
 
 ## Local benchmark scoring
 
@@ -120,8 +120,8 @@ Results are written under `test-results/<timestamp>/`:
 - `manifest.json` records the corpus, categories, limits, sample seed, and exact selected runs.
 - `results.jsonl` is flushed after every run and includes verdict, score, witness status,
   termination reason, diagnostic tail, log path, and the direct tool invocation.
-- `logs/` retains complete stdout, stderr, and generated witnesses.
-- `summary.json` reports the score, normalized leaf-category scores, and result counts;
+- `logs/` retains complete stdout, stderr, generated witnesses, and `.validation.log` validator logs.
+- `summary.json` reports the score, normalized leaf-category scores, result counts, and witness confirmation fraction;
   `--output FILE.csv` adds CSV.
 
 ### Scoring and witness validation
@@ -135,16 +135,21 @@ positive points for a correct answer whose required witness is not confirmed, so
 an upper bound on what the competition would award.
 
 To confirm witnesses, supply an external validator. `tests/validate_witness.sh` wraps CPAchecker and
-exits zero only on confirmation. It has been verified against CPAchecker 4.2, which needs Java 17 or
-newer and selects validation through config files rather than a command-line flag:
+exits zero only on confirmation. It has been tested against CPAchecker 4.2 with compliant YAML 2.0
+correctness and violation witnesses on both ILP32 and LP64. CPAchecker 4.2 requires **Java 21 or newer**.
 
 ```sh
-export CPACHECKER_HOME=/opt/CPAchecker-4.2-unix
+export CPACHECKER_HOME="$HOME/.local/opt/CPAchecker-4.2-unix"
 python tests/tester.py ../sv-benchmarks "$PWD" \
   --category reachsafety --profile competition \
-  --validation-wall-limit 600 \
   --validator-command 'tests/validate_witness.sh {witness} {input} {property} {bits}'
 ```
+
+An explicit validator checks all emitted witnesses. Limits are 300s for correctness and 90s for
+violation witnesses. `summary.json` reports generated/confirmed counts and their fraction under
+`witness_validation`; `.validation.log` files retain validator diagnostics. Inspect warnings:
+CPAchecker can report TRUE while warning that unsupported function side effects were ignored.
+Currently SVF emits correctness witnesses only.
 
 Placeholders are `{witness}`, `{input}`, `{property}`, and `{bits}`. Previously computed results can
 be supplied instead with `--validation-results results.json`, a JSON object mapping run IDs to
