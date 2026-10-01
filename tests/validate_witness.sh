@@ -22,7 +22,6 @@ witness=$1
 input=$2
 property=$3
 bits=$4
-timelimit=${VALIDATOR_TIMELIMIT:-300s}
 
 if [[ -z "${CPACHECKER_HOME:-}" ]]; then
     echo "CPACHECKER_HOME is not set; cannot validate witnesses" >&2
@@ -41,25 +40,44 @@ if [[ ! -s "$witness" ]]; then
     exit 1
 fi
 
-# Violation witnesses carry an explicit violation flag; anything else is a correctness witness.
-if grep -q 'key="violation"' "$witness"; then
-    config="--violation-witness-validation"
+kind=$(python3 - "$witness" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1]) as stream:
+    types = {entry['entry_type'] for entry in yaml.safe_load(stream)}
+if not types or not types <= {'violation_sequence', 'invariant_set'}:
+    raise ValueError('unsupported YAML witness type')
+print('violation' if 'violation_sequence' in types else 'correctness')
+PY
+) || exit 1
+
+if [[ "$kind" == violation ]]; then
+    config="$CPACHECKER_HOME/config/violation-witness-validation.properties"
     expected="Verification result: FALSE"
+    timelimit=${VALIDATOR_TIMELIMIT:-90s}
 else
-    config="--correctness-witness-validation"
+    config="$CPACHECKER_HOME/config/correctness-witness-validation.properties"
     expected="Verification result: TRUE"
+    timelimit=${VALIDATOR_TIMELIMIT:-300s}
 fi
 
+output_dir=$(mktemp -d) || exit 3
+trap 'rm -rf -- "$output_dir"' EXIT
+
 output=$("$cpa" \
-    "$config" \
+    --config "$config" \
     --witness "$witness" \
     --spec "$property" \
     "--$bits" \
     --timelimit "$timelimit" \
     --no-output-files \
+    --output-path "$output_dir" \
     "$input" 2>&1)
+status=$?
 
-if grep -qF "$expected" <<<"$output"; then
+if [[ $status -eq 0 ]] && grep -qF "$expected" <<<"$output"; then
+    echo "$output"
     exit 0
 fi
 
