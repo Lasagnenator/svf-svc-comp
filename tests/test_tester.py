@@ -6,17 +6,116 @@ python -m unittest tests.test_tester -v
 import json
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+import generate_witness
+import invariants
+import yaml
+
 from tests import tester
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTER_PATH = ROOT / "tests" / "tester.py"
+
+
+class WitnessExportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('clang-21'), 'clang-21 is not installed')
+    def test_ast_uses_physical_positions_and_operator_kinds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text(
+                '#line 400 "logical.c"\nint main(void) {\n'
+                '  int x = 0, y = 0; volatile int value = 0;\n'
+                ' \twhile (1) { x += 1; }\n  do { y--; } while (1);\n}\n')
+            loops = invariants._source_loops(source)
+            self.assertEqual([(loop['line'], loop['column']) for loop in loops], [(4, 3), (5, 3)])
+            self.assertEqual([loop['allowed_names'] for loop in loops], [{'y'}, {'x'}])
+
+    @mock.patch.object(invariants.subprocess, 'run')
+    def test_failed_ast_dump_is_skipped(self, run):
+        for failure in (FileNotFoundError('clang-21'),
+                        SimpleNamespace(returncode=1, stdout=''),
+                        SimpleNamespace(returncode=0, stdout='not JSON')):
+            run.side_effect = failure if isinstance(failure, Exception) else None
+            run.return_value = failure
+            self.assertEqual(invariants._source_loops('program.c'), [])
+
+    @unittest.skipUnless(shutil.which('clang-21'), 'clang-21 is not installed')
+    def test_loop_coordinates_and_stable_variables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "program.c"
+            source.write_text(
+                "void escape(int *);\nint main(void) {\n"
+                "  int i = 0, x = 0, y = 0;\n  escape(&y);\n"
+                "  for (i = 0; 1; i++) {\n    x;\n  }\n}\n")
+            loop, = invariants._source_loops(source)
+            self.assertEqual((loop['line'], loop['column']), (5, 3))
+            self.assertEqual(loop['allowed_names'], {'x'})
+            head = mock.Mock()
+            head.getSourceLoc.return_value = '{"ln": 6, "cl": 5, "fl": "temporary.c"}'
+            head.getFun.return_value.getName.return_value = 'main'
+            state = object()
+            analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={head: state})
+            with mock.patch.object(invariants, 'invariant_at', return_value='(x == 0)') as render:
+                entry, = invariants.extract_loop_invariants(analysis, None, str(source))
+            self.assertEqual((entry['line'], entry['column']), (5, 3))
+            render.assert_called_once_with(head, state, None, None, {'x'}, 5)
+
+    def test_missing_locations_and_unparsed_source_are_skipped(self):
+        head = mock.Mock()
+        analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={})
+        with mock.patch.object(invariants, '_source_loops', return_value=[]):
+            for location in ('', '{"ln": 0}', '{"ln": 1}', '{"ln": 1, "cl": 0}'):
+                head.getSourceLoc.return_value = location
+                self.assertEqual(invariants.extract_loop_invariants(analysis, None, 'missing.c'), [])
+        self.assertEqual(invariants._source_loops('/nonexistent/witness-source.c'), [])
+
+    def test_incomplete_invariant_records_are_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { while (1) {} }\n')
+            witness = Path(directory) / 'witness.yml'
+            record = {'type': 'loop_invariant', 'file_name': str(source), 'line': 1,
+                      'column': 18, 'function': 'main', 'value': '1'}
+            incomplete = [None] + [record | {key: None} for key in ('line', 'column', 'function', 'value')]
+            generate_witness.write_witness(
+                incomplete + [record], [str(source)], 'G ! call(reach_error())', str(witness))
+            entry, = yaml.safe_load(witness.read_text())
+            self.assertEqual(entry['metadata']['format_version'], '2.0')
+            self.assertEqual(len(entry['content']), 1)
+            location = entry['content'][0]['invariant']['location']
+            self.assertEqual(location, {'file_name': str(source), 'line': 1, 'column': 18, 'function': 'main'})
+
+    def test_wrapper_reports_missing_columns_without_starting_cpachecker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            witness = Path(directory) / 'witness.yml'
+            witness.write_text(yaml.safe_dump([{'entry_type': 'invariant_set', 'content': [
+                {'invariant': {'location': {'file_name': 'program.c', 'line': 1}}}]}]))
+            with mock.patch.dict('os.environ', {'CPACHECKER_HOME': directory}):
+                home = Path(directory)
+                (home / 'bin').mkdir()
+                (home / 'bin' / 'cpachecker').symlink_to('/bin/false')
+                result = subprocess.run(
+                    [str(ROOT / 'tests' / 'validate_witness.sh'), str(witness), 'program.c', 'prop.prp', '64'],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('explicit positive invariant line and column', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            witness.write_text(yaml.safe_dump([{'entry_type': 'invariant_set', 'content': [
+                {'invariant': {'location': {'file_name': 'program.c', 'line': 1, 'column': 1}}}]}]))
+            with mock.patch.dict('os.environ', {'CPACHECKER_HOME': directory}):
+                result = subprocess.run(
+                    [str(ROOT / 'tests' / 'validate_witness.sh'), str(witness), 'program.c', 'prop.prp', '64'],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('explicit invariant function name', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
 
 
 class TesterUnitTests(unittest.TestCase):

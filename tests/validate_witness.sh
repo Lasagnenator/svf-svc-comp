@@ -45,9 +45,20 @@ import sys
 import yaml
 
 with open(sys.argv[1]) as stream:
-    types = {entry['entry_type'] for entry in yaml.safe_load(stream)}
+    entries = yaml.safe_load(stream)
+if not isinstance(entries, list) or not entries or any(not isinstance(entry, dict) for entry in entries):
+    raise SystemExit('Expected a nonempty YAML witness entry list')
+types = {entry.get('entry_type') for entry in entries}
 if not types or not types <= {'violation_sequence', 'invariant_set'}:
-    raise ValueError('unsupported YAML witness type')
+    raise SystemExit('Unsupported YAML witness type')
+for entry in entries:
+    if entry['entry_type'] == 'invariant_set':
+        for item in entry.get('content') or []:
+            location = item.get('invariant', {}).get('location', {})
+            if any(type(location.get(key)) is not int or location[key] < 1 for key in ('line', 'column')):
+                raise SystemExit('CPAchecker 4.2 requires an explicit positive invariant line and column')
+            if not isinstance(location.get('function'), str) or not location['function'].strip():
+                raise SystemExit('CPAchecker 4.2 requires an explicit invariant function name')
 print('violation' if 'violation_sequence' in types else 'correctness')
 PY
 ) || exit 1
