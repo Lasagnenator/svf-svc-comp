@@ -632,7 +632,6 @@ class AbstractExecution:
             print(f"Infeasible for node {node.getId()}")
             return False
 
-        ###SVF SV-COMP-ADDITION
         # A node can be reached on a later iteration (a loop body whose first visit
         # preceded its back edge), so an earlier prune is no longer the reason it has
         # no post state.
@@ -690,15 +689,13 @@ class AbstractExecution:
             self.resumeAfterUnanalysedCall(node)
 
     def computeUnreachableNodes(self):
-        """Nodes with no live path in, i.e. every edge reaching them was pruned.
-        Seeded with the nodes the merge proved infeasible and pushed forward: a successor
-        joins the set once all of its own in-edges come from it. Nodes that already hold a
-        state are reachable by construction and are never added.
+        """Nodes with no live path in: every incoming edge comes from an unreachable node.
+        Starts from the infeasible nodes and propagates forward. Analysed nodes are excluded.
         """
         unreachable = {node for node in self.infeasible_nodes
                        if node not in self.post_abs_trace}
-        # A node with no in-edges can only be entered where the walk starts. Anything else
-        # is unreachable by construction. Seeded, since no predecessor leads to them.
+        # Nodes with no in-edges are unreachable unless they're a walk start point.
+        # Add them to the starting set, since propagation can't discover them.
         for node in self.icfg.getNodes():
             if node in self.post_abs_trace or node in unreachable:
                 continue
@@ -753,14 +750,11 @@ class AbstractExecution:
             self.infeasible_nodes.add(ret)
 
     def resumeAfterUnanalysedCall(self, node: pysvf.CallICFGNode):
-        """Carry the caller's state across a call whose body was not walked.
+        """Continue analysis past a call whose body we didn't analyse.
 
-        Without this the return node has no analysed predecessor and is reported as a
-        dropped path on top of the gap the call itself already recorded. The callee's
-        effects are unknown, so the returned value is havoced.
-
-        The state goes to the ret node's merge, not its trace: a pre-filled
-        state would look like a fixpoint and stop the walk.
+        Stages the caller's state for the ret node, with the return value set to top
+        (callee's result unknown). Stored in `skipped_states`, not the trace, since a
+        pre-filled trace entry would look like a fixpoint and stop the walk.
         """
         ret = node.getRetICFGNode()
         if ret is None or node not in self.post_abs_trace:
@@ -951,12 +945,10 @@ class AbstractExecution:
             # meet_with yields an inverted interval, not bottom, for disjoint operands.
             if self.intervalIsEmpty(feasible_values):
                 return False
-        ###SVF SV-COMP-ADDITION
         # Also narrow the cmp operands, not just the i1 result; False = dead branch.
         return self.refineOnBranch(cmp_var, successor, abstractState)
 
 
-    ###SVF SV-COMP-ADDITION
     # Floats absent deliberately: with NaN, !(a < b) is not (a >= b).
     NEGATED_ICMP = {
         Predicate.ICMP_SLT: Predicate.ICMP_SGE, Predicate.ICMP_SGE: Predicate.ICMP_SLT,
@@ -981,13 +973,13 @@ class AbstractExecution:
         cmp = in_edges[0]
         if not isinstance(cmp, pysvf.CmpStmt):
             return True
-        # getPredicate() returns a bare int; normalise to the enum before lookup.
         try:
             predicate = Predicate(int(cmp.getPredicate()))
         except ValueError:
             return True
         if predicate not in self.NEGATED_ICMP:
-            return True  # float or unrecognised predicate: no refinement, stay sound
+            # float or unrecognised predicate: no refinement
+            return True
         if successor == 0:
             predicate = self.NEGATED_ICMP[predicate]
         elif successor != 1:
@@ -1088,7 +1080,8 @@ class AbstractExecution:
         return not any(isinstance(st, pysvf.StoreStmt) for st in tail[after:])
 
     def refineLoadedCell(self, var, cmp, refined, abstract_state):
-        """-O0 re-loads on every use, so narrow the memory cell, not just the loaded value."""
+        """Also narrow the memory cell the compared value was loaded from. At -O0 each use
+        re-loads it, so narrowing only the loaded value would be lost."""
         in_edges = var.getInEdges()
         if len(in_edges) == 0:
             return
@@ -1102,7 +1095,8 @@ class AbstractExecution:
             return
         addrs = list(pointer.getAddrs())
         if len(addrs) != 1:
-            return  # may-alias: we do not know which cell was read, so narrow nothing
+            # may-alias: we do not know which cell was read, so narrow nothing
+            return
         abstract_state.store(addrs[0], AbstractValue(refined))
 
 
@@ -1270,8 +1264,6 @@ class AbstractExecution:
         abstract_state[addr.getLHSVarID()] = abstract_state[addr.getRHSVarID()]
 
 
-
-    ###SVF SV-COMP-ADDITION
     def unsignedCompare(self, predicate, lhs, rhs):
         """Unsigned compare over signed intervals; only decidable when both sides are non-negative."""
         zero = pysvf.BoundedInt(0)
@@ -1293,8 +1285,6 @@ class AbstractExecution:
         op1 = cmp.getOpVar(1)
         res = cmp.getResId()
         if abstract_state.getVar(op0.getId()).isInterval() and abstract_state.getVar(op1.getId()).isInterval():
-            ###SVF SV-COMP-ADDITION
-            # Was IntervalValue(0) -- "definitely false"; [0,1] is the sound default.
             res_val = IntervalValue(0, 1)
             lhs = abstract_state[op0.getId()].getInterval()
             rhs = abstract_state[op1.getId()].getInterval()
@@ -1311,10 +1301,8 @@ class AbstractExecution:
                 res_val = (lhs < rhs)
             elif predicate == Predicate.ICMP_SLE or predicate == Predicate.FCMP_OLE or predicate == Predicate.FCMP_ULE:
                 res_val = (lhs <= rhs)
-            ###SVF SV-COMP-ADDITION
-            # ICMP_UGT/UGE were missing entirely; ICMP_ULT/ULE used signed operators.
-            elif predicate in (Predicate.ICMP_UGT, Predicate.ICMP_UGE,
-                               Predicate.ICMP_ULT, Predicate.ICMP_ULE):
+            elif (predicate == Predicate.ICMP_UGT or predicate == Predicate.ICMP_UGE or
+                  predicate == Predicate.ICMP_ULT or predicate == Predicate.ICMP_ULE):
                 res_val = self.unsignedCompare(predicate, lhs, rhs)
             elif predicate == Predicate.FCMP_FALSE:
                 res_val = IntervalValue(0,0)
@@ -1588,8 +1576,7 @@ class AbstractExecution:
         if abstract_state.getVar(rhs).isAddr():
             self.ae_manager.updateAbsState(node, abstract_state)
             loaded = self.ae_manager.loadValue(load.getRHSVar(), node)
-            ###SVF SV-COMP-ADDITION
-            # Unwritten cell reads BOTTOM; C calls it indeterminate, i.e. TOP.
+            # Unwritten cell or empty interval -> top.
             if not loaded.isAddr() and (not loaded.isInterval()
                                         or self.intervalIsEmpty(loaded.getInterval())):
                 loaded = AbstractValue(IntervalValue.top())
@@ -1739,7 +1726,6 @@ class AbstractExecution:
             pre_iteration_as = self.post_abs_trace[head] if head in self.post_abs_trace else None
             self.handleICFGNode(head)  # Handle the cycle head node
             if head not in self.post_abs_trace:
-                # No feasible state this pass; a correctly pruned head is not a gap.
                 if head not in self.infeasible_nodes:
                     self.recordGap(f"cycle head {head.getId()} had no feasible state")
                 break
