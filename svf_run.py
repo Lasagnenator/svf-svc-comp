@@ -32,13 +32,6 @@ def main():
     log(f"Arguments: {args}")
     log(f"Extra unknown arguments: {extra}")
 
-    # format 2.0+ only accept .yml file
-    if args.witness is None:
-        args.witness = "witness.yml" if args.witness_format == "2.0" else "witness.graphml"
-    if args.witness_format == "2.0" and not args.witness.endswith(".yml"):
-        log(f"Warning: format 2.0 requires .yml, ignoring {args.witness}")
-        args.witness = "witness.yml"
-
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
@@ -67,7 +60,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
     # SV-COMP tasks predate clang 15; demote these errors and raise the bracket limit.
-    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
+    command = ["clang-21", f"-m{bits}", "-S", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
                "-Wno-error=int-conversion",
                "-Wno-error=implicit-function-declaration",
                "-Wno-error=incompatible-function-pointer-types",
