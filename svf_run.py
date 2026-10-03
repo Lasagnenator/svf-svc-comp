@@ -4,10 +4,11 @@ import pysvf
 import argparse
 import subprocess
 import tempfile
+import generate_witness
+import invariants
 
 import nondet
 from util import *
-import witness_output
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
 
@@ -19,17 +20,18 @@ def main():
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--witness", default="witness.graphml", help="witness output")
+    parser.add_argument("--witness", default="witness.yml", help="witness output")
+    parser.add_argument("--witness-format", default="2.0", choices=["2.0", "2.1", "2.2"], help="witness format version")
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
     log(f"Arguments: {args}")
     log(f"Extra unknown arguments: {extra}")
 
-    runSVF(args.c_file, args.prop, args.witness, args.bits)
+    runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0"):
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -38,6 +40,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
 
         buffer.write(c_code)
         buffer.write(nondet_defs)
+
+    # Anything SVF reports past this line comes from the appended nondet definitions
+    # rather than the input, so invariants there must not reach the witness.
+    input_line_count = len(c_code.splitlines())
 
     buffer.flush()
 
@@ -48,7 +54,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
-    command = ["clang", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
+    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}")
@@ -163,9 +169,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64"):
         print("Unknown")
         correctness = "Unknown"
 
-    ###TODO: right now it doesnt do invariants
-    witness_output.generate_witness(
-        correctness, input_file_path, prop_file_path, witness_file_path, bits)
+    if "Correct" in correctness and "Incorrect" not in correctness:
+        with open(prop_file_path) as f:
+            spec = f.read().strip()
+        loop_invariants = invariants.extract_loop_invariants(
+            ae, pag, input_file_path, input_line_count)
+        log(f"Exported {len(loop_invariants)} loop invariant(s).")
+        generate_witness.write_witness(
+            loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
+            'ILP32' if bits == "32" else 'LP64')
+    else:
+        # violation_sequence not implemented yet; produce nothing
+        log(f"No witness for result: {correctness}")
 
     working_file.close()
     pysvf.releasePAG()

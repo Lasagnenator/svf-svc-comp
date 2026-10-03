@@ -1197,18 +1197,22 @@ class AbstractExecution:
         node = select.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         assert isinstance(abstract_state, AbstractState)
-        res = select.get_res_id()
-        tval = select.get_true_value().getId()
-        fval = select.get_false_value().getId()
+        res = select.getResId()
+        tval = select.getTrueValue().getId()
+        fval = select.getFalseValue().getId()
         cond = select.getCondition().getId()
-        if abstract_state[cond].getInterval().isInterval():
-            if abstract_state[cond].getInterval().is_zero():
+        cond_value = abstract_state.getVar(cond)
+        if cond_value.isInterval():
+            condition = cond_value.getInterval()
+            if condition.is_zero():
                 abstract_state[res] = abstract_state[fval]
-            else:
+                return
+            if condition.is_numeral():
                 abstract_state[res] = abstract_state[tval]
-        else:
-            abstract_state[res].joinWith(abstract_state[tval])
-            abstract_state[res].joinWith(abstract_state[fval])
+                return
+        result = abstract_state[tval].clone()
+        result.join_with(abstract_state[fval])
+        abstract_state[res] = result
 
 
 
