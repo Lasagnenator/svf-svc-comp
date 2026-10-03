@@ -1,4 +1,4 @@
-FROM ubuntu:26.04
+FROM ubuntu:24.04
 
 # Stop ubuntu-20 interactive options.
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,7 +37,7 @@ CMD ["/usr/sbin/sshd", "-D"]
 
 
 # Define dependencies.
-ENV lib_deps="cmake g++ gcc clang-21 git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="cmake g++ gcc clang git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 
 # Fetch dependencies.
