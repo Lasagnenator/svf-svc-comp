@@ -54,7 +54,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
-    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
+    command = ["clang", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}")
