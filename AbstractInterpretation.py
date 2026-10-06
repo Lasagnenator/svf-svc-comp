@@ -944,7 +944,7 @@ class AbstractExecution:
     def analyse(self):
         self.initWto()
         self.handleGlobalNode()
-        # # Process the main function if it exists
+        # Process the main function if it exists
         main_fun = self.svfir.getFunObjVar("main")
         if main_fun:
             # Arguments of main are initialized as top to represent all possible inputs
