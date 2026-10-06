@@ -463,11 +463,6 @@ class AbstractExecution:
         self.results["reach"] = []
         self.results["bufferoverflow"] = []
 
-        self.results["memoryleak"] = []
-        self.results["nulldereference"] = []
-        self.results["useafterfree"] = []
-        self.results["doublefree"] = []
-        self.results["badfree"] = []
         # Stores dropped paths
         self.results["incomplete"] = []
         # Functions actually entered
@@ -480,6 +475,12 @@ class AbstractExecution:
         self.unreachable_nodes = set()
         # Ret node -> state carried over from its call node when the function body is not analysed.
         self.skipped_states = {}
+
+        self.results["memoryleak"] = []
+        self.results["nulldereference"] = []
+        self.results["useafterfree"] = []
+        self.results["doublefree"] = []
+        self.results["badfree"] = []
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -1402,6 +1403,15 @@ class AbstractExecution:
         res = cmp.getResId()
         if abstract_state.getVar(op0.getId()).isInterval() and abstract_state.getVar(op1.getId()).isInterval():
             res_val = IntervalValue(0, 1)
+        
+        #Check both op0 and op1 instead of just op0
+        is_op0_int = abstract_state.getVar(op0.getId()).isInterval()
+        is_op1_int = abstract_state.getVar(op1.getId()).isInterval()
+        is_op0_addr = abstract_state.getVar(op0.getId()).isAddr()
+        is_op1_addr = abstract_state.getVar(op1.getId()).isAddr()
+
+        if is_op0_int and is_op1_int:
+            res_val = IntervalValue(0)
             lhs = abstract_state[op0.getId()].getInterval()
             rhs = abstract_state[op1.getId()].getInterval()
             predicate = cmp.getPredicate()
@@ -1427,6 +1437,9 @@ class AbstractExecution:
             abstract_state[res] = AbstractValue(res_val)
         if abstract_state.getVar(op0.getId()).isAddr() and abstract_state.getVar(op1.getId()).isAddr():
             res_val = None
+
+        elif is_op0_addr and is_op1_addr:
+            res_val = IntervalValue.top()
             lhs = abstract_state[op0.getId()]
             rhs = abstract_state[op1.getId()]
             predicate = cmp.getPredicate()
@@ -1584,6 +1597,27 @@ class AbstractExecution:
                 self.ae_manager.updateAbsState(pointer_node, abstract_state)
             offset = self.ae_manager.getGepElementIndex(gep)
             abstract_state[lhs] = self.ae_manager.getGepObjAddrs(pointer, offset)
+
+        rhs_var = abstract_state.getVar(rhs)
+        if rhs_var.isAddr():
+            valid_addrs = False
+            for addr in rhs_var.getAddrs():
+                # Verify it's not exclusively a NULL/Freed pointer before asking C++ to compute offsets
+                if addr != 0 and not abstract_state.isNullMem(addr) and not abstract_state.isFreedMem(addr):
+                    valid_addrs = True
+                    break
+            
+            if valid_addrs:
+                try:
+                    self.ae_manager.updateAbsState(node, abstract_state)
+                    offset = self.ae_manager.getGepElementIndex(gep)
+                    abstract_state[lhs] = self.ae_manager.getGepObjAddrs(gep.getRHSVar(), offset)
+                except Exception:
+                    abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+            else:
+                abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+        else:
+            abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
 
     #TODO: your code starts from here
     def updateStateOnStore(self, store: pysvf.StoreStmt):
