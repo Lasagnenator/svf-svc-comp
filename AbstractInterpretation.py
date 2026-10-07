@@ -1084,10 +1084,8 @@ class AbstractExecution:
 
         #if a path includes a freed memory obj, then the state when merged is set to freed to be conservative
         merged_alloc_state = {}
-
         # Heap simulated Lifetime  merge
         merged_lifetime = {}
-
         # Alloc count
         merged_alloc_count = {}
 
