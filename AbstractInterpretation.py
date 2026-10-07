@@ -1108,22 +1108,17 @@ class AbstractExecution:
 
                         if self.isBranchFeasible(edge, tmp_es):
                             abstract_state.joinWith(tmp_es)
-                            self.joinLifetimeMaps(merged_lifetime, src_lifetime)
                             in_edge_num += 1
                     else:
                         abstract_state.joinWith(self.post_abs_trace[src])
-
-                        self.joinLifetimeMaps(merged_lifetime, src_lifetime)
-                        self.joinAllocCountMaps(merged_alloc_count, src_alloc_count)
                         in_edge_num += 1
                 else:
                     abstract_state.joinWith(self.post_abs_trace[src])
-
-                    self.joinLifetimeMaps(merged_lifetime, src_lifetime)
-                    self.joinAllocCountMaps(merged_alloc_count, src_alloc_count)
-
                     in_edge_num += 1
 
+                self.joinLifetimeMaps(merged_lifetime, src_lifetime)
+                self.joinAllocCountMaps(merged_alloc_count, src_alloc_count)
+                
             elif edge.getSrcNode() not in self.infeasible_nodes:
                 unanalysed_preds += 1
         # A call whose body was not walked acts as an extra predecessor of its ret node.
@@ -1964,6 +1959,7 @@ class AbstractExecution:
     :type ext_call_node: pysvf.CallICFGNode
     """
     def updateStateOnExtCall(self, extCallNode: pysvf.CallICFGNode):
+        # Get function name
         func_name = extCallNode.getCalledFunction().getName()
         
         # Initialize the alloc state for this node if not exists
@@ -2024,13 +2020,11 @@ class AbstractExecution:
                 if var.isObjVar() and var.asObjVar().isHeapObjVar():
                     if var.asObjVar().asHeapObjVar().getICFGNode().getId() == extCallNode.getId():
                         heap_obj_id = var_id
-                        print(f"[MALLOC] the heap_obj_id is {heap_obj_id}")
                         break
             
             if heap_obj_id is not None:
                 # 3. Mint the address and assign it to the return variable
                 alloc_addr = self.getVirtualMemAddress(heap_obj_id)
-                print(f"[MALLOC ADDR] the alloc addr is {alloc_addr} for {heap_obj_id}")
                 abstract_state[lhs_id] = pysvf.AbstractValue(pysvf.AddressValue(alloc_addr))
                 
                 lifetime_state = self.post_lifetime_trace[extCallNode]
@@ -2049,7 +2043,6 @@ class AbstractExecution:
                 else:
                     alloc_count_state[heap_obj_id] = AllocationCount.MANY
                 
-                print(f"[MALLOC COUNT] heap={heap_obj_id}, " f"{old_count} -> {alloc_count_state[heap_obj_id]}")
 
                 # 4. Register the allocation for memory leak tracking
                 self.node_to_alloc_state[extCallNode][heap_obj_id] = alloc_addr
