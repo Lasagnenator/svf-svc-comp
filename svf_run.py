@@ -1,4 +1,6 @@
 #! /usr/bin/env python3
+import os
+from pathlib import Path
 
 import pysvf
 import argparse
@@ -57,15 +59,25 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     log(buffer.read())
 
     # Compiles the C source file to LLVMIR
-    working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
+    # working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
 
-    # SV-COMP tasks predate clang 15; demote these errors and raise the bracket limit.
-    command = ["clang-21", f"-m{bits}", "-S", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
-               "-Wno-error=int-conversion",
-               "-Wno-error=implicit-function-declaration",
-               "-Wno-error=incompatible-function-pointer-types",
-               "-fbracket-depth=1024",
-               "-o", working_file.name,]
+    # # SV-COMP tasks predate clang 15; demote these errors and raise the bracket limit.
+    # command = ["clang-21", f"-m{bits}", "-S", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
+    #            "-Wno-error=int-conversion",
+    #            "-Wno-error=implicit-function-declaration",
+    #            "-Wno-error=incompatible-function-pointer-types",
+    #            "-fbracket-depth=1024",
+    #            "-o", working_file.name,]
+    ## Debug mode ##
+    debug_dir = Path("debug_output")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    input_name = Path(input_file_path).stem
+    working_file_path = debug_dir / f"{input_name}.ll"
+
+    # command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
+    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", str(working_file_path),]
+
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}")
@@ -74,18 +86,19 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     log(f"Clang exitted with code {retcode}.")
 
     if retcode != 0:
-        log(f"Clang failed to output {working_file.name}. SVF will fail.")
-        working_file.close()
+        log(f"Clang failed to output {str(working_file_path)}. SVF will fail.")
+        # working_file.close()
         fail("ERROR(CLANG)", retcode)
 
     try:
         # This code is copied from python/test-ae.py to use SVF
-        pysvf.buildSVFModule(working_file.name)
+        pysvf.buildSVFModule(str(working_file_path))
         pag = pysvf.getPAG()
+        pag.dump(f"./debug_output/my_pag")
     except Exception as e:
         log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
         log_exception(e)
-        working_file.close()
+        # working_file.close()
         fail("ERROR(SVF)")
 
     # parse input prop file path to find the file name
@@ -99,7 +112,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
-        working_file.close()
+        # working_file.close()
         fail("ERROR(AE)")
 
     if prop_file_name == 'unreach-call.prp':
@@ -178,6 +191,39 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         else:
             print("OVERFLOW Correct")
             correctness = "Correct"
+            
+    elif prop_file_name == 'valid-memsafety.prp':
+        # This property file bundles valid-deref, valid-free, and valid-memtrack.
+        # We check our arrays in order and fail if any of them detected a violation.
+        
+        if len(ae.results.get("nulldereference", [])) > 0:
+            print("MEMORY Incorrect(valid-deref)")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
+            print("MEMORY Incorrect(valid-free)")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("memoryleak", [])) > 0:
+            print("MEMORY Incorrect(valid-memtrack)")
+            correctness = "Incorrect"
+        elif len(ae.results.get("badfree", [])) > 0:
+            print("MEMORY Incorrect(valid-free)")
+            correctness = "Incorrect"
+            
+        else:
+            print("MEMORY Correct")
+            correctness = "Correct"
+
+    elif prop_file_name == 'valid-memcleanup.prp':
+        # Memcleanup requires all memory to be explicitly freed before exit.
+        # Our memory leak detector at the end of main() handles this perfectly.
+        if len(ae.results.get("memoryleak", [])) > 0:
+            print("CLEANUP Incorrect")
+            correctness = "Incorrect"
+        else:
+            print("CLEANUP Correct")
+            correctness = "Correct"
 
     else:
         # Unsupported category.
@@ -197,7 +243,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # violation_sequence not implemented yet; produce nothing
         log(f"No witness for result: {correctness}")
 
-    working_file.close()
+    # working_file.close()
     pysvf.releasePAG()
 
 
