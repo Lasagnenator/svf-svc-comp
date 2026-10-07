@@ -76,7 +76,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     working_file_path = debug_dir / f"{input_name}.ll"
 
     # command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", working_file.name,]
-    command = ["clang-21", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", str(working_file_path),]
+    command = ["clang", f"-m{bits}", "-S", "-c", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm", "-o", str(working_file_path),]
 
     command.append(buffer.name)
 
