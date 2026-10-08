@@ -1,3 +1,12 @@
+# pysvf's bundled LLVM and SVF binaries link libxml2.so.2, which Ubuntu 26.04 replaced
+# with the ABI-incompatible libxml2.so.16. Take the old library and its ICU from 24.04.
+FROM ubuntu:24.04 AS libxml2-compat
+RUN apt-get update && apt-get install -y --no-install-recommends libxml2 \
+    && mkdir /compat \
+    && cp -L /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
+             /usr/lib/x86_64-linux-gnu/libicuuc.so.74 \
+             /usr/lib/x86_64-linux-gnu/libicudata.so.74 /compat/
+
 FROM ubuntu:26.04
 
 # Stop ubuntu-20 interactive options.
@@ -5,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install SSH server
 RUN apt-get update && apt-get install -y openssh-server
-RUN mkdir /var/run/sshd
+RUN mkdir -p /var/run/sshd
 
 # Define home
 ENV HOME=/home/svf
@@ -37,25 +46,23 @@ CMD ["/usr/sbin/sshd", "-D"]
 
 
 # Define dependencies.
-ENV lib_deps="cmake g++ gcc clang-21 git zlib1g-dev libncurses5-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="cmake g++ gcc clang-21 llvm-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 
 # Fetch dependencies.
 RUN apt-get update --fix-missing
 RUN apt-get install -y --no-install-recommends $build_deps $lib_deps
 
-# Install Python and set up venv
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-dev \
-    python3-venv \
-    libxml2
+# pysvf only ships wheels up to CPython 3.12, but Ubuntu 26.04 only has 3.14,
+# so uv provides a standalone 3.12. Keep it outside /root so the svf user can run it.
+RUN apt-get update && apt-get install -y python3
+COPY --from=libxml2-compat /compat/ /opt/compat-libs/
+RUN echo /opt/compat-libs > /etc/ld.so.conf.d/pysvf-compat.conf && ldconfig
+COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_LINK_MODE=copy UV_NO_CACHE=1
 COPY requirements.txt /tmp/requirements.txt
-RUN python3 -m venv /opt/venv
-RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt
-# Install pyyaml because it's likely needed for testing
-RUN /opt/venv/bin/python -m pip install pyyaml
+RUN uv venv --python 3.12 /opt/venv
+RUN uv pip install --python /opt/venv/bin/python -r /tmp/requirements.txt
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN echo 'export PATH="/opt/venv/bin:$PATH"' >> /etc/profile

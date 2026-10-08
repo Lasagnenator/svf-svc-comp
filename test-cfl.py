@@ -7,7 +7,7 @@ from cfl_reachability import CFLreachability
 def compile_to_bc(src):
     if src.endswith(".c"):
         bc = src.replace(".c", ".bc")
-        cmd = ["clang", "-S", "-c", "-emit-llvm", "-O0", "-g", "-o", bc, src]
+        cmd = ["clang-21", "-S", "-c", "-emit-llvm", "-O0", "-g", "-o", bc, src]
         subprocess.check_call(cmd)
         return bc
     return src
