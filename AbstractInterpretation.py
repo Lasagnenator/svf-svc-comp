@@ -1915,21 +1915,6 @@ class AbstractExecution:
 
                         if not base_obj:
                             continue
-                        
-
-                        # if isinstance(obj, pysvf.GepObjVar):
-                        #     print("Object is GepObjVar")
-                        #     print(
-                        #         "Known GEP base offset:",
-                        #         self.buf_overflow_helper.hasGepObjOffsetFromBase(obj)
-                        #     )
-                        #     if self.buf_overflow_helper.hasGepObjOffsetFromBase(obj):
-                        #         print(
-                        #             "Stored base offset:",
-                        #             self.buf_overflow_helper.getGepObjOffsetFromBase(obj)
-                        #         )
-
-                        #     print("==================================\n")
 
                         if isinstance(access_offset, pysvf.IntervalValue) and not access_offset.isBottom():
                             # Explicitly flag completely unconstrained offsets (`Top`) from elements like rand()
