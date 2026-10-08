@@ -20,6 +20,8 @@ runtime_files=(
     tests/basic_reach.c
     tests/cfl_test2.c
     tests/unreach-call.prp
+    tests/basic_mem_overflow.c
+    tests/valid-memsafety.prp
 )
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }

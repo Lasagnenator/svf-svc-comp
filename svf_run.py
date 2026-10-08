@@ -168,15 +168,15 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         else:
             print("REACH Correct")
             correctness = "Correct"
-    elif prop_file_name == 'no-overflow.prp':
+    elif prop_file_name == 'valid-memsafety.prp':
         # TODO: Identify if this is the correct memory error type.
         # if the list of SVFstmts where buffer overflows occur is non-zero, then there are buffer overflows
         # (kinda because of how our use of the SVF python API is done)
         if len(ae.results.get("bufferoverflow", [])) > 0:
-            print("OVERFLOW Incorrect")
+            print("MEMORY Incorrect")
             correctness = "Incorrect"
         else:
-            print("OVERFLOW Correct")
+            print("MEMORY Correct")
             correctness = "Correct"
 
     else:
