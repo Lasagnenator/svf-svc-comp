@@ -4,8 +4,6 @@ tests/*
 !tests/test_tester.py
 !tests/fetch_benchmarks.py
 !tests/validate_witness.sh
-
-!tests/mem-safety
 venv
 test-results/
 dist/
@@ -13,3 +11,4 @@ sv-benchmarks/
 sv-benchmarks-*/
 authorized_keys
 witness.yml
+debug_output/

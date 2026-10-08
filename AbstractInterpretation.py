@@ -475,6 +475,10 @@ class AbstractExecution:
         self.pre_lifetime_trace = {}
         self.post_lifetime_trace = {}
 
+        #used for tracking offsets for pointers
+        self.pre_ptr_offset_trace = {}   # node -> {var_id: IntervalValue}
+        self.post_ptr_offset_trace = {}  # node -> {var_id: IntervalValue}
+
         # Allocation abstract state before/after each ICFG node
         self.pre_alloc_count_trace = {}
         self.post_alloc_count_trace = {}
@@ -525,10 +529,16 @@ class AbstractExecution:
             
         # Build mapping from cycle head nodes to their corresponding cycles
         self.cycle_head_to_cycle = {}
-        for fun, wto in self.func_to_wto.items():
-            for comp in wto.components:
+        
+        #Recursively extract ALL cycles, including nested inner loops
+        def extract_cycles(components):
+            for comp in components:
                 if isinstance(comp, ICFGWTOCycle):
                     self.cycle_head_to_cycle[comp.head.node] = comp
+                    extract_cycles(comp.components)
+                    
+        for fun, wto in self.func_to_wto.items():
+            extract_cycles(wto.components)
 
 
     """
@@ -536,6 +546,14 @@ class AbstractExecution:
     """
     def getVirtualMemAddress(self, idx: int) -> int:
         return self.addressMask + idx
+    
+    def joinPtrOffsetMaps(self, dst: Dict[int, pysvf.AbstractValue], src: Dict[int, pysvf.AbstractValue]):
+        """ Safely join dictionary-based offset traces """
+        for var_id, src_val in src.items():
+            if var_id not in dst:
+                dst[var_id] = src_val.clone()
+            else:
+                dst[var_id].join_with(src_val)
 
 
     """
@@ -556,9 +574,10 @@ class AbstractExecution:
         self.pre_lifetime_trace[global_node] = {}
         self.post_lifetime_trace[global_node] = {}
 
-        # FIX: Pre-populate all constants into the baseline global state.
-        # Since all states derive from the global state, these constants will 
-        # naturally propagate through the entire ICFG via `joinWith`.
+        # Initialize the offset trace natively as standard Python dictionaries
+        self.pre_ptr_offset_trace[global_node] = {}
+        self.post_ptr_offset_trace[global_node] = {}
+
         global_state = self.post_abs_trace[self.icfg.getGlobalICFGNode()]
         global_state[0] = AbstractValue(AddressValue(set()))
 
@@ -582,9 +601,11 @@ class AbstractExecution:
     def handleWtoComponents(self, wtoComps):
         for comp in wtoComps:
             if isinstance(comp, ICFGWTONode):
-                self.handleICFGNode(comp)
+                # Unwrap the node before passing it
+                self.handleICFGNode(comp.node)
             elif isinstance(comp, ICFGWTOCycle):
-                self.handleCycleWto(comp)
+                # Call the correct cycle handler
+                self.handleICFGCycle(comp)
 
     """
     Handle a function in the ICFG using WTO components and worklist algorithm.
@@ -599,30 +620,11 @@ class AbstractExecution:
         fun = funEntry.getFun()
         if fun is not None:
             self.visited.add(fun.getName())
-        # Use worklist algorithm to process nodes
-        worklist = [funEntry]  # FIFO worklist using list
-        
-        while worklist:
-            node = worklist.pop(0)  # FIFO: pop from front
             
-            # Check if current node is a cycle head
-            if node in self.cycle_head_to_cycle:
-                cycle = self.cycle_head_to_cycle[node]
-                self.handleICFGCycle(cycle)
-                # Get next nodes of the cycle and add to worklist
-                cycle_next_nodes = self.getNextNodesOfCycle(cycle)
-                for next_node in cycle_next_nodes:
-                    worklist.append(next_node)
-            else:
-                # Handle singleton node
-                if not self.handleICFGNode(node):
-                    print(f"Fixpoint reached or infeasible for node {node.getId()}")
-                    continue
-                
-                # Get next nodes and add to worklist
-                next_nodes = self.getNextNodes(node)
-                for next_node in next_nodes:
-                    worklist.append(next_node)
+        wto = self.func_to_wto.get(fun)
+        if wto:
+            # Structurally delegate all traversal to the WTO components
+            self.handleWtoComponents(wto.components)
 
     """
     Get the next nodes of a given ICFG node.
@@ -666,34 +668,27 @@ class AbstractExecution:
     """
     def getNextNodesOfCycle(self, cycle: ICFGWTOCycle) -> List[pysvf.ICFGNode]:
         cycle_nodes = set()
-        cycle_nodes.add(cycle.head.node)
         
-        for comp in cycle.components:
-            if isinstance(comp, ICFGWTONode):
-                cycle_nodes.add(comp.node)
-            elif isinstance(comp, ICFGWTOCycle):
-                cycle_nodes.add(comp.head.node)
+        # Recursively collect every single node inside the entire cycle structure
+        def collect_nodes(c: ICFGWTOCycle):
+            cycle_nodes.add(c.head.node)
+            for comp in c.components:
+                if isinstance(comp, ICFGWTONode):
+                    cycle_nodes.add(comp.node)
+                elif isinstance(comp, ICFGWTOCycle):
+                    collect_nodes(comp)
+                    
+        collect_nodes(cycle)
         
         out_edges = []
         
-        # Get next nodes of cycle head
-        next_nodes = self.getNextNodes(cycle.head.node)
-        for next_node in next_nodes:
-            if next_node not in cycle_nodes:
-                out_edges.append(next_node)
-        
-        # Get next nodes of cycle components
-        for comp in cycle.components:
-            if isinstance(comp, ICFGWTONode):
-                next_nodes = self.getNextNodes(comp.node)
-                for next_node in next_nodes:
-                    if next_node not in cycle_nodes:
-                        out_edges.append(next_node)
-            elif isinstance(comp, ICFGWTOCycle):
-                # Skip inner cycles inside the outer cycle
-                # because their next nodes won't be outside the outer cycle
-                continue
-        
+        # Any edge coming from a node inside the cycle pointing to a node
+        # OUTSIDE the cycle is a valid exit path.
+        for node in cycle_nodes:
+            for next_node in self.getNextNodes(node):
+                if next_node not in cycle_nodes:
+                    out_edges.append(next_node)
+                    
         return out_edges
 
 
@@ -709,37 +704,34 @@ class AbstractExecution:
     def handleICFGNode(self, node: pysvf.ICFGNode):
         is_feasible, self.pre_abs_trace[node] = self.mergeStatesFromPredecessors(node)
 
-        ###SVF SV-COMP-ADDITION
-        ###TODO find some other way to propagate the results to the thing
         if isinstance(node, pysvf.CallICFGNode):
-            # because of how svf-comp has formatted their asserts, handling reachability detection is
-            # the same as handling assertions in the code
             callNode = node.asCall()
             called_func = callNode.getCalledFunction()
             if called_func is not None and called_func.getName() == "reach_error":
                 self.results["reach"].append((is_feasible, callNode))
-        
 
         if not is_feasible:
-            # Marks node as reached and infeasible
             self.infeasible_nodes.add(node)
-            print(f"Infeasible for node {node.getId()}")
             return False
 
-        # A node can be reached on a later iteration (a loop body whose first visit
-        # preceded its back edge), so an earlier prune is no longer the reason it has
-        # no post state.
         self.infeasible_nodes.discard(node)
         
-        # Store the last abstract state, used to check if the abstract state has reached a fixpoint
         last_as = self.post_abs_trace[node] if node in self.post_abs_trace else None
         last_lifetime = self.post_lifetime_trace[node].copy() if node in self.post_lifetime_trace else None
-
         last_alloc_count = self.post_alloc_count_trace[node].copy() if node in self.post_alloc_count_trace else None
+        
+        last_ptr_offsets = {}
+        if node in self.post_ptr_offset_trace:
+            for k, v in self.post_ptr_offset_trace[node].items():
+                last_ptr_offsets[k] = v.clone()
 
         self.post_abs_trace[node] = self.pre_abs_trace[node]
-        self.post_lifetime_trace[node] = (self.pre_lifetime_trace.get(node, {}).copy())
-        self.post_alloc_count_trace[node] = (self.pre_alloc_count_trace.get(node, {}).copy())
+        self.post_lifetime_trace[node] = self.pre_lifetime_trace.get(node, {}).copy()
+        self.post_alloc_count_trace[node] = self.pre_alloc_count_trace.get(node, {}).copy()
+        
+        self.post_ptr_offset_trace[node] = {}
+        for k, v in self.pre_ptr_offset_trace.get(node, {}).items():
+            self.post_ptr_offset_trace[node][k] = v.clone()
 
         try:
             self.ae_manager.updateAbsState(node, self.pre_abs_trace[node])
@@ -748,29 +740,29 @@ class AbstractExecution:
         
         for stmt in node.getSVFStmts():
             self.updateAbsState(stmt)
-            self.bufOverflowDetection(stmt)
 
         if isinstance(node, pysvf.CallICFGNode):
             self.handleCallSite(node)
         
-        # Check for both abstract state and lifetime state as well
-        abs_unchanged = ( last_as is not None and self.post_abs_trace[node] == last_as)
-
-        lifetime_unchanged = ( last_lifetime is not None and self.post_lifetime_trace[node] == last_lifetime)
-
+        abs_unchanged = (last_as is not None and self.post_abs_trace[node] == last_as)
+        lifetime_unchanged = (last_lifetime is not None and self.post_lifetime_trace[node] == last_lifetime)
         alloc_count_unchanged = (last_alloc_count is not None and self.post_alloc_count_trace[node] == last_alloc_count)
+        
+        ptr_offsets_unchanged = True
+        if last_ptr_offsets is None:
+            ptr_offsets_unchanged = False
+        else:
+            for k, v in self.post_ptr_offset_trace[node].items():
+                old_v = last_ptr_offsets.get(k)
+                if old_v is None or not old_v.getInterval().equals(v.getInterval()):
+                    ptr_offsets_unchanged = False
+                    break
 
-        ## Print statement
-        # if self.post_lifetime_trace.get(node):
-        #     print(
-        #         f"[LIFETIME NODE {node.getId()}] "
-        #         f"{self.post_lifetime_trace[node]}"
-        #     )
-        if abs_unchanged and lifetime_unchanged and alloc_count_unchanged:
+        if abs_unchanged and lifetime_unchanged and alloc_count_unchanged and ptr_offsets_unchanged:
             return False
         
         return True
-
+    
     """
     Handle a call site in the control flow graph
     
@@ -887,49 +879,71 @@ class AbstractExecution:
 
     def handleCallSite(self, node: pysvf.CallICFGNode):
         called_func = node.getCalledFunction()
+        
+        # Handle Indirect Calls
         if called_func is None:
             has_indirect = False
             for edge in node.getOutEdges():
                 # Identify interprocedural call edges
-                if not edge.isIntraCFGEdge() and edge.getDstNode().getFun() != node.getFun():
+                if not edge.isIntraCFGEdge() and node.getFun() and edge.getDstNode().getFun() != node.getFun():
                     target_func = edge.getDstNode().getFun()
                     if target_func:
                         has_indirect = True
-                        self.handleFunction(self.svfir.getICFG().getFunEntryICFGNode(target_func))
+                        target_name = target_func.getName()
+                        
+                        # Break indirect cycles using absolute string identity
+                        if target_name not in self.call_site_stack:
+                            self.call_site_stack.append(target_name)
+                            self.handleFunction(self.svfir.getICFG().getFunEntryICFGNode(target_func))
+                            self.call_site_stack.pop()
+                        else:
+                            self.recordGap(f"recursive indirect function body not analysed: {target_name}")
+                            self.resumeAfterUnanalysedCall(node)
             
             if not has_indirect:
                 if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                     lhs_id = node.getRetICFGNode().getActualRet().getId()
                     self.post_abs_trace[node][lhs_id] = pysvf.AbstractValue(pysvf.IntervalValue.top())
             return
-        
-        fun_name = node.getCalledFunction().getName()
+            
+        # Handle Direct Calls
+        fun_name = called_func.getName()
         print(fun_name)
-        if fun_name == "OVERFLOW" or fun_name == "svf_assert" or fun_name == "svf_assert_eq":
+        
+        if fun_name in ["OVERFLOW", "svf_assert", "svf_assert_eq"]:
             self.handleStubFunction(node)
-        elif fun_name == "nd" or fun_name == "rand":
-            lhs_id = node.getRetICFGNode().getActualRet().getId()
-            self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
+        elif fun_name in ["nd", "rand"]:
+            if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
+                lhs_id = node.getRetICFGNode().getActualRet().getId()
+                self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
         elif fun_name in ["mem_insert", "str_insert", "malloc", "free", "calloc", "realloc"]: 
             self.updateStateOnExtCall(node)
-        elif pysvf.isExtCall(node.getCalledFunction()):
-            # The body is never walked, so the callee's exit gets no state,
-            # deal with it here.
+        elif pysvf.isExtCall(called_func):
             if fun_name in self.SAFE_EXTERNALS:
-                # These never return, so the code after the call is dead.
                 self.markCallNeverReturns(node)
             elif self.isMemoryExternal(fun_name):
                 self.handleMemoryCall(node, fun_name)
             else:
                 self.recordGap(f"external call not modelled: {fun_name}")
                 self.resumeAfterUnanalysedCall(node)
-        elif node.getCalledFunction() in self.recursive_funs:
+        # Break direct recursive cycles using absolute string identity
+        elif called_func in self.recursive_funs or fun_name in self.call_site_stack:
             self.recordGap(f"recursive function body not analysed: {fun_name}")
             self.resumeAfterUnanalysedCall(node)
             return
         else:
-            self.handleFunction(self.svfir.getICFG().getFunEntryICFGNode(node.getCalledFunction()))
-
+            fun_entry = self.svfir.getICFG().getFunEntryICFGNode(called_func)
+            old_entry_state = self.post_abs_trace.get(fun_entry)
+            
+            # Fast-path: Only analyze the callee if the incoming state shifted
+            is_feasible, merged_as = self.mergeStatesFromPredecessors(fun_entry)
+            if not is_feasible:
+                return
+                
+            if old_entry_state is None or merged_as != old_entry_state:
+                self.call_site_stack.append(fun_name)
+                self.handleFunction(fun_entry)
+                self.call_site_stack.pop()
 
     """
     Handle stub functions such as 'svf_assert' and 'OVERFLOW'.
@@ -1088,9 +1102,24 @@ class AbstractExecution:
         merged_lifetime = {}
         # Alloc count
         merged_alloc_count = {}
+        merged_ptr_offsets = {} 
+        
+        is_ret_node = isinstance(block, pysvf.RetICFGNode)
+        call_node = block.getCallICFGNode() if is_ret_node else None
+        
+        callee_analyzed = False
+        if is_ret_node:
+            for edge in block.getInEdges():
+                src = edge.getSrcNode()
+                if isinstance(src, pysvf.FunExitICFGNode) and src in self.post_abs_trace:
+                    callee_analyzed = True
+                    break
 
         for edge in block.getInEdges():
             src = edge.getSrcNode()
+
+            if is_ret_node and src == call_node and callee_analyzed:
+                continue
 
             if src in self.post_abs_trace:
                 src_alloc = self.node_to_alloc_state.get(src, {})
@@ -1099,6 +1128,7 @@ class AbstractExecution:
 
                 src_lifetime = self.post_lifetime_trace.get(src, {})
                 src_alloc_count = self.post_alloc_count_trace.get(src, {})
+                src_ptr_offsets = self.post_ptr_offset_trace.get(src, {})
 
                 if isinstance(edge, pysvf.IntraCFGEdge):
                     if edge.getCondition():
@@ -1106,12 +1136,15 @@ class AbstractExecution:
 
                         if self.isBranchFeasible(edge, tmp_es):
                             abstract_state.joinWith(tmp_es)
+                            self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets) 
                             in_edge_num += 1
                     else:
                         abstract_state.joinWith(self.post_abs_trace[src])
+                        self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                         in_edge_num += 1
                 else:
                     abstract_state.joinWith(self.post_abs_trace[src])
+                    self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                     in_edge_num += 1
 
                 self.joinLifetimeMaps(merged_lifetime, src_lifetime)
@@ -1135,6 +1168,7 @@ class AbstractExecution:
         self.node_to_alloc_state[block] = merged_alloc_state
         self.pre_lifetime_trace[block] = merged_lifetime
         self.pre_alloc_count_trace[block] = merged_alloc_count
+        self.pre_ptr_offset_trace[block] = merged_ptr_offsets
 
         return (True, abstract_state)
 
@@ -1192,8 +1226,62 @@ class AbstractExecution:
         op0, op1 = cmp.getOpVar(0), cmp.getOpVar(1)
         id0, id1 = op0.getId(), op1.getId()
         v0, v1 = abstract_state.getVar(id0), abstract_state.getVar(id1)
+        node = cmp.getICFGNode()
+        
+        # --- Pointer Refinement Logic ---
+        if v0.isAddr() or v1.isAddr():
+            addr_id = id0 if v0.isAddr() else id1
+            other_v = v1 if v0.isAddr() else v0
+            
+            is_other_null = False
+            if other_v.isAddr() and (0 in other_v.getAddrs() or pysvf.NullMemAddr in other_v.getAddrs()):
+                is_other_null = True
+            elif other_v.isInterval() and other_v.getInterval().is_zero():
+                is_other_null = True
+                
+            if is_other_null:
+                addr_val = abstract_state.getVar(addr_id)
+                addrs = set(addr_val.getAddrs())
+                
+                if predicate == Predicate.ICMP_EQ:
+                    if 0 in addrs or pysvf.NullMemAddr in addrs:
+                        null_val = 0 if 0 in addrs else pysvf.NullMemAddr
+                        abstract_state[addr_id] = pysvf.AbstractValue(pysvf.AddressValue(null_val))
+                    else:
+                        return False 
+                elif predicate == Predicate.ICMP_NE:
+                    addrs.discard(0)
+                    addrs.discard(pysvf.NullMemAddr)
+                    if len(addrs) == 0:
+                        return False 
+                    abstract_state[addr_id] = pysvf.AbstractValue(pysvf.AddressValue(addrs))
+            
+            # Pointer Offset Narrowing for Pointer Comparisons (e.g. ptr1 < ptr2) ---
+            if node in self.post_ptr_offset_trace:
+                ptr_offsets = self.post_ptr_offset_trace[node]
+                off0 = ptr_offsets.get(id0)
+                off1 = ptr_offsets.get(id1)
+                
+                if off0 and off1 and off0.isInterval() and off1.isInterval():
+                    # Mathematically slice the offset intervals based on the comparison
+                    r0, r1 = self.refineIntervalPair(predicate, off0.getInterval(), off1.getInterval())
+                    if r0 is not None:
+                        if self.intervalIsEmpty(r0) or self.intervalIsEmpty(r1):
+                            return False # Mathematically dead branch
+                            
+                        ptr_offsets[id0] = pysvf.AbstractValue(r0)
+                        ptr_offsets[id1] = pysvf.AbstractValue(r1)
+                        
+                        # Apply back to stack memory to ensure the loop doesn't re-explode next iteration
+                        self.refineLoadedCellOffset(op0, cmp, r0, ptr_offsets, abstract_state)
+                        self.refineLoadedCellOffset(op1, cmp, r1, ptr_offsets, abstract_state)
+            
+            return True
+
+        # --- Original Interval Refinement Logic ---
         if not (v0.isInterval() and v1.isInterval()):
             return True
+            
         i0, i1 = v0.getInterval(), v1.getInterval()
         if self.intervalIsEmpty(i0) or self.intervalIsEmpty(i1):
             return True
@@ -1207,14 +1295,38 @@ class AbstractExecution:
         if r0 is None:
             return True
         if self.intervalIsEmpty(r0) or self.intervalIsEmpty(r1):
-            return False  # the operands cannot satisfy this predicate: branch is dead
+            return False 
 
         for var, var_id, refined, original in ((op0, id0, r0, i0), (op1, id1, r1, i1)):
             if refined == original:
                 continue
-            abstract_state[var_id] = AbstractValue(refined)
+            abstract_state[var_id] = pysvf.AbstractValue(refined)
             self.refineLoadedCell(var, cmp, refined, abstract_state)
         return True
+
+
+    def refineLoadedCellOffset(self, var, cmp, refined, ptr_offsets, abstract_state):
+        """Helper to write the narrowed offset back to the stack pointer cell."""
+        in_edges = var.getInEdges()
+        if len(in_edges) == 0:
+            return
+        load = in_edges[0]
+        if not isinstance(load, pysvf.LoadStmt):
+            return
+        if not self.loadReachesCmpUnmodified(load, cmp):
+            return
+            
+        pointer = abstract_state.getVar(load.getRHSVarID())
+        if not pointer.isAddr():
+            return
+            
+        addrs = list(pointer.getAddrs())
+        if len(addrs) != 1:
+            return
+            
+        # Write the narrowed offset back to the memory key tracker
+        mem_key = f"mem_{addrs[0]}"
+        ptr_offsets[mem_key] = pysvf.AbstractValue(refined)
 
     def refineIntervalPair(self, predicate, i0, i1):
         """Given `i0 <predicate> i1` holds, return narrowed (i0, i1), or (None, None)."""
@@ -1493,6 +1605,9 @@ class AbstractExecution:
         assert isinstance(abstract_state, AbstractState)
         abstract_state[addr.getRHSVarID()] = AbstractValue(self.initObjVar(addr.getRHSVar().asObjVar()))
         abstract_state[addr.getLHSVarID()] = abstract_state[addr.getRHSVarID()]
+        
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        ptr_offsets[addr.getLHSVarID()] = AbstractValue(pysvf.IntervalValue(0, 0))
 
 
     def unsignedCompare(self, predicate, lhs, rhs):
@@ -1549,8 +1664,6 @@ class AbstractExecution:
             elif predicate == Predicate.FCMP_TRUE:
                 res_val = IntervalValue(1,1)
             abstract_state[res] = AbstractValue(res_val)
-        if abstract_state.getVar(op0.getId()).isAddr() and abstract_state.getVar(op1.getId()).isAddr():
-            res_val = None
 
         elif is_op0_addr and is_op1_addr:
             res_val = IntervalValue.top()
@@ -1617,25 +1730,63 @@ class AbstractExecution:
     def updateStateOnCall(self, call: pysvf.CallPE):
         node = call.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        result = AbstractValue()
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
+        result = None
+        result_offset = None
+        
         for index in range(call.getOpVarNum()):
             call_node = call.getOpCallICFGNode(index)
             if call_node in self.post_abs_trace:
-                result.join_with(self.post_abs_trace[call_node][call.getOpVarId(index)])
-        abstract_state[call.getResId()] = result
+                actual_id = call.getOpVarId(index)
+                val = self.post_abs_trace[call_node].getVar(actual_id)
+                
+                if result is None:
+                    result = val
+                else:
+                    if result is not val:
+                        result = result.clone()
+                        result.join_with(val)
+                    
+                if call_node in self.post_ptr_offset_trace:
+                    off_val = self.post_ptr_offset_trace[call_node].get(actual_id)
+                    if off_val is not None:
+                        if result_offset is None:
+                            result_offset = off_val
+                        else:
+                            if result_offset is not off_val:
+                                result_offset = result_offset.clone()
+                                result_offset.join_with(off_val)
+                            
+        abstract_state[call.getResId()] = result if result is not None else pysvf.AbstractValue(pysvf.IntervalValue.top())
+        
+        if result_offset is not None:
+            ptr_offsets[call.getResId()] = result_offset
 
 
     def updateStateOnRet(self, ret: pysvf.RetPE):
         node = ret.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        abstract_state[ret.getLHSVarID()] = abstract_state[ret.getRHSVarID()]
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
+        rhs_id = ret.getRHSVarID()
+        lhs_id = ret.getLHSVarID()
+        
+        # Propagate Return Value
+        val = abstract_state.getVar(rhs_id)
+        abstract_state[lhs_id] = val.clone()
+        
+        # Propagate Return Pointer Offsets
+        if rhs_id in ptr_offsets:
+            ptr_offsets[lhs_id] = ptr_offsets[rhs_id].clone()
 
 
 
     def updateStateOnSelect(self, select: pysvf.SelectStmt):
         node = select.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        assert isinstance(abstract_state, AbstractState)
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
         res = select.getResId()
         tval = select.getTrueValue().getId()
         fval = select.getFalseValue().getId()
@@ -1644,15 +1795,35 @@ class AbstractExecution:
         if cond_value.isInterval():
             condition = cond_value.getInterval()
             if condition.is_zero():
-                abstract_state[res] = abstract_state[fval]
+                abstract_state[res] = abstract_state.getVar(fval).clone()
+                if fval in ptr_offsets:
+                    ptr_offsets[res] = ptr_offsets[fval].clone()
                 return
             if condition.is_numeral():
-                abstract_state[res] = abstract_state[tval]
+                abstract_state[res] = abstract_state.getVar(tval).clone()
+                if tval in ptr_offsets:
+                    ptr_offsets[res] = ptr_offsets[tval].clone()
                 return
-        result = abstract_state[tval].clone()
-        result.join_with(abstract_state[fval])
+                
+        # Merge both execution paths
+        result = abstract_state.getVar(tval).clone()
+        result.join_with(abstract_state.getVar(fval))
         abstract_state[res] = result
-
+        
+        t_off = ptr_offsets.get(tval)
+        f_off = ptr_offsets.get(fval)
+        
+        res_off = None
+        if t_off is not None:
+            res_off = t_off.clone()
+        if f_off is not None:
+            if res_off is None:
+                res_off = f_off.clone()
+            else:
+                res_off.join_with(f_off)
+                
+        if res_off is not None:
+            ptr_offsets[res] = res_off
 
 
 
@@ -1693,67 +1864,115 @@ class AbstractExecution:
         else:
             assert isinstance(obj, pysvf.DummyObjVar), "What other types of object?"
             return pysvf.IntervalValue.top()
+        
+    
 
     #TODO : Implement the state updates for Copy, Binary, Store, Load, Gep, Phi
     # TODO: your code starts from here
     def updateStateOnGep(self, gep: pysvf.GepStmt):
         node = gep.getICFGNode()
         abstract_state = self.post_abs_trace[node]
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
         assert isinstance(abstract_state, AbstractState)
+
         lhs = gep.getLHSVarID()
         rhs = gep.getRHSVarID()
-        if abstract_state.getVar(rhs).isAddr():
-            self.ae_manager.updateAbsState(node, abstract_state)
-            # getGepObjAddrs resolves state from the pointer's defining node; register both.
-            pointer = gep.getRHSVar()
-            pointer_node = pointer.getICFGNode()
-            if pointer_node is not None and pointer_node != node:
-                self.ae_manager.updateAbsState(pointer_node, abstract_state)
-            offset = self.ae_manager.getGepElementIndex(gep)
-            abstract_state[lhs] = self.ae_manager.getGepObjAddrs(pointer, offset)
-
         rhs_var = abstract_state.getVar(rhs)
+
+        # Deferred cloning pass-through
         if rhs_var.isAddr():
-            valid_addrs = False
-            for addr in rhs_var.getAddrs():
-                # Verify it's not exclusively a NULL/Freed pointer before asking C++ to compute offsets
-                # if addr != 0 and not abstract_state.isNullMem(addr) and not abstract_state.isFreedMem(addr):
-                if addr != 0 and not abstract_state.isNullMem(addr):
-                    valid_addrs = True
-                    break
-            
-            if valid_addrs:
-                try:
-                    self.ae_manager.updateAbsState(node, abstract_state)
-                    offset = self.ae_manager.getGepElementIndex(gep)
-                    abstract_state[lhs] = self.ae_manager.getGepObjAddrs(gep.getRHSVar(), offset)
-                except Exception:
-                    abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
-            else:
-                abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+            abstract_state[lhs] = rhs_var 
         else:
             abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+
+        offset_val = ptr_offsets.get(rhs)
+        base_offset = offset_val.getInterval() if (offset_val and offset_val.isInterval()) else pysvf.IntervalValue(0, 0)
+
+        if rhs_var.isAddr():
+            # Alias Cutoff: Stop tracking bounds for pointers that alias massively
+            if len(rhs_var.getAddrs()) > 50:
+                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+                return
+
+            try:
+                self.ae_manager.updateAbsState(node, abstract_state)
+                pointer = gep.getRHSVar()
+                index_iv = self.ae_manager.getGepElementIndex(gep)
+                
+                if index_iv is not None and index_iv.isInterval():
+                    # Fast-path cache initialization
+                    if not hasattr(self, '_type_size_cache'):
+                        self._type_size_cache = {}
+                    
+                    ptr_type = pointer.getType()
+                    type_id = ptr_type.getId() if ptr_type else None
+                    
+                    # Compute only on cache miss
+                    if type_id not in self._type_size_cache:
+                        elem_size = 1
+                        if ptr_type and ptr_type.isPointerTy():
+                            elem_type = self.ae_manager.getPointeeElement(pointer, node)
+                            if elem_type:
+                                elem_size = elem_type.getTypeOfElement().getByteSize() if elem_type.isArrayTy() else elem_type.getByteSize()
+                        self._type_size_cache[type_id] = elem_size if elem_size > 0 else 1
+                        
+                    elem_size = self._type_size_cache[type_id]
+                    gep_increment = index_iv * pysvf.IntervalValue(elem_size, elem_size)
+                    ptr_offsets[lhs] = pysvf.AbstractValue(base_offset + gep_increment)
+                else:
+                    ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+            except Exception:
+                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+        else:
+            ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
 
     #TODO: your code starts from here
     def updateStateOnStore(self, store: pysvf.StoreStmt):
         node = store.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        assert isinstance(abstract_state, AbstractState)
-        lhs = store.getLHSVarID()
-        rhs = store.getRHSVarID()
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
+        lhs = store.getLHSVarID() # Memory location
+        rhs = store.getRHSVarID() # Value being stored
 
         self.checkMemorySafety(node, lhs)
+        self.checkBufferOverflow(node, lhs)
 
         if abstract_state.getVar(lhs).isAddr():
             value = abstract_state[rhs]
-            if self.needsWeakUpdate(abstract_state, abstract_state[lhs].getAddrs()):
+            needs_weak = self.needsWeakUpdate(abstract_state, abstract_state[lhs].getAddrs())
+            
+            if needs_weak:
                 value = value.clone()
                 for addr in abstract_state[lhs].getAddrs():
                     if abstract_state.getIDFromAddr(addr) in abstract_state.getLocToVal():
                         value.join_with(abstract_state.load(addr))
+                        
             self.ae_manager.updateAbsState(node, abstract_state)
             self.ae_manager.storeValue(store.getLHSVar(), value, node)
             self.post_abs_trace[node] = self.ae_manager.getAbsState(node).clone()
+            
+            # --- FIX: Pointer Offset Memory Tracking ---
+            rhs_var = abstract_state.getVar(rhs)
+            offset_val = ptr_offsets.get(rhs)
+            
+            if rhs_var.isAddr() and offset_val is not None:
+                # Store the offset using the memory object ID as the key
+                for addr in abstract_state.getVar(lhs).getAddrs():
+                    mem_key = -addr
+                    if needs_weak and mem_key in ptr_offsets:
+                        merged = ptr_offsets[mem_key].clone()
+                        merged.join_with(offset_val)
+                        ptr_offsets[mem_key] = merged
+                    else:
+                        ptr_offsets[mem_key] = offset_val.clone()
+            else:
+                # Strong update: clear offset if storing a non-pointer
+                if not needs_weak:
+                    for addr in abstract_state.getVar(lhs).getAddrs():
+                        mem_key = -addr
+                        if mem_key in ptr_offsets:
+                            del ptr_offsets[mem_key]
 
     def needsWeakUpdate(self, abstract_state, addrs) -> bool:
         """ Update when exact location is unknown: adds its value to what the 
@@ -1839,40 +2058,98 @@ class AbstractExecution:
     def updateStateOnLoad(self, load: pysvf.LoadStmt):
         node = load.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        assert isinstance(abstract_state, AbstractState)
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
         lhs = load.getLHSVarID()
         rhs = load.getRHSVarID()
 
         self.checkMemorySafety(node, rhs)
+        self.checkBufferOverflow(node, rhs)
 
         if abstract_state.getVar(rhs).isAddr():
             self.ae_manager.updateAbsState(node, abstract_state)
             loaded = self.ae_manager.loadValue(load.getRHSVar(), node)
-            # Unwritten cell or empty interval -> top.
-            if not loaded.isAddr() and (not loaded.isInterval()
-                                        or self.intervalIsEmpty(loaded.getInterval())):
-                loaded = AbstractValue(IntervalValue.top())
+            
+            if not loaded.isAddr() and (not loaded.isInterval() or self.intervalIsEmpty(loaded.getInterval())):
+                loaded = pysvf.AbstractValue(pysvf.IntervalValue.top())
             abstract_state[lhs] = loaded
+            
+            # --- FIX: Retrieve Pointer Offsets from Memory ---
+            if loaded.isAddr():
+                merged_offset = None
+                for addr in abstract_state.getVar(rhs).getAddrs():
+                    mem_key = -addr
+                    off = ptr_offsets.get(mem_key)
+                    if off is not None:
+                        if merged_offset is None:
+                            merged_offset = off.clone()
+                        else:
+                            merged_offset.join_with(off)
+                            
+                if merged_offset is not None:
+                    ptr_offsets[lhs] = merged_offset
+                else:
+                    ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
+            else:
+                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
         else:
-            abstract_state[lhs] = AbstractValue(IntervalValue.top())
+            abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+            ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
 
     #TODO: your code starts from here
     def updateStateOnCopy(self, copy: pysvf.CopyStmt):
         node = copy.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        abstract_state[copy.getLHSVarID()] = abstract_state[copy.getRHSVarID()]
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
+        lhs = copy.getLHSVarID()
+        rhs = copy.getRHSVarID()
+        
+        abstract_state[lhs] = abstract_state.getVar(rhs)
+        if rhs in ptr_offsets:
+            ptr_offsets[lhs] = ptr_offsets[rhs]
+
 
     # TODO: your code starts from here
     def updateStateOnPhi(self, phi: pysvf.PhiStmt):
         node = phi.getICFGNode()
         abstract_state = self.post_abs_trace[node]
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        
         lhs = phi.getResId()
-        result = AbstractValue()
+        result = None
+        result_offset = None
+        
         for i in range(phi.getOpVarNum()):
             op_var = phi.getOpVar(i)
-            if abstract_state.getVar(op_var.getId()).isInterval() or abstract_state.getVar(op_var.getId()).isAddr():
-                result.join_with(abstract_state[op_var.getId()])
-        abstract_state[lhs] = result
+            def_node = op_var.getICFGNode()
+            if def_node is not None and def_node in self.infeasible_nodes:
+                continue
+                
+            op_id = op_var.getId()
+            op_val = abstract_state.getVar(op_id)
+            
+            if op_val.isInterval() or op_val.isAddr():
+                if result is None:
+                    result = op_val
+                else:
+                    if result is not op_val:
+                        result = result.clone()
+                        result.join_with(op_val)
+                    
+                if op_id in ptr_offsets:
+                    off_val = ptr_offsets[op_id]
+                    if result_offset is None:
+                        result_offset = off_val
+                    else:
+                        if result_offset is not off_val:
+                            result_offset = result_offset.clone()
+                            result_offset.join_with(off_val)
+                        
+        if result is not None:
+            abstract_state[lhs] = result
+        if result_offset is not None:
+            ptr_offsets[lhs] = result_offset
 
     """
     Detect buffer overflows in the given statement.
@@ -1885,6 +2162,53 @@ class AbstractExecution:
     :param stmt: The statement to analyze for buffer overflows.
     :type stmt: pysvf.SVFStmt
     """
+    def checkBufferOverflow(self, node: pysvf.ICFGNode, ptr_id: int):
+        if node not in self.post_abs_trace:
+            return
+            
+        abstract_state = self.post_abs_trace[node]
+        ptr_offsets = self.post_ptr_offset_trace.get(node, {})
+        ptr_val = abstract_state.getVar(ptr_id)
+        
+        if not ptr_val.isAddr():
+            return
+            
+        offset_val = ptr_offsets.get(ptr_id)
+        if offset_val and offset_val.isInterval():
+            current_offset = offset_val.getInterval()
+        else:
+            current_offset = pysvf.IntervalValue(0, 0)
+            
+        for addr in ptr_val.getAddrs():
+            if addr == 0 or abstract_state.isNullMem(addr):
+                continue
+                
+            obj_id = abstract_state.getIDFromAddr(addr)
+            
+            try:
+                base_obj = self.svfir.getBaseObject(obj_id)
+                if not base_obj:
+                    continue
+                
+                obj_size = base_obj.getByteSizeOfObj()
+                
+                # Dynamic array fallback check (VLA / mallocs with 0 static size)
+                if obj_size == 0 and not base_obj.isConstantByteSize():
+                    # For SV-COMP, if it widened to Top and wasn't narrowed, it's considered unbounded
+                    if current_offset.isTop():
+                        msg = "Buffer overflow detected. Unbounded access on dynamically sized object."
+                        self.buf_overflow_helper.reportBufOverflow(node, msg)
+                        self.results["bufferoverflow"].append(node)
+                    continue 
+
+                # Standard verification evaluation
+                if obj_size > 0:
+                    if current_offset.isTop() or int(current_offset.ub()) >= obj_size or int(current_offset.lb()) < 0:
+                        msg = f"Buffer overflow detected. Object size: {obj_size}, accessing offset {current_offset}"
+                        self.buf_overflow_helper.reportBufOverflow(node, msg)
+                        self.results["bufferoverflow"].append(node)
+            except RuntimeError:
+                continue
     def bufOverflowDetection(self, stmt: pysvf.SVFStmt):
         if not isinstance(stmt.getICFGNode(), pysvf.CallICFGNode):
             if isinstance(stmt, pysvf.GepStmt):
@@ -1994,10 +2318,11 @@ class AbstractExecution:
     
         elif func_name in ["malloc", "calloc", "realloc"]:
             abstract_state = self.post_abs_trace[extCallNode]
-            # 1. Get the return variable (LHS) of the malloc call
+            ptr_offsets = self.post_ptr_offset_trace.setdefault(extCallNode, {})
             lhs_id = extCallNode.getRetICFGNode().getActualRet().getId()
             
-            # 2. Find the SVF HeapObjVar associated with this specific call site
+            ptr_offsets[lhs_id] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
+            
             heap_obj_id = None
             for var_id, var in self.svfir:
                 if var.isObjVar() and var.asObjVar().isHeapObjVar():
@@ -2021,24 +2346,33 @@ class AbstractExecution:
 
                 if old_count == AllocationCount.ZERO:
                     alloc_count_state[heap_obj_id] = AllocationCount.ONE
-                elif old_count == AllocationCount.ONE:
-                    alloc_count_state[heap_obj_id] = AllocationCount.MANY
                 else:
                     alloc_count_state[heap_obj_id] = AllocationCount.MANY
                 
 
                 # 4. Register the allocation for memory leak tracking
                 self.node_to_alloc_state[extCallNode][heap_obj_id] = alloc_addr
-            else:
-                print(f"Warning: Could not find HeapObjVar for malloc at {extCallNode}")
             
         elif func_name == "free":
             abstract_state = self.post_abs_trace[extCallNode]
             lifetime_state = self.post_lifetime_trace[extCallNode]
             alloc_count_state = self.post_alloc_count_trace[extCallNode]
+            ptr_offsets = self.post_ptr_offset_trace.setdefault(extCallNode, {})
 
             arg_id = extCallNode.getArgument(0).getId()
             arg_val = abstract_state[arg_id]
+            
+            offset_val = ptr_offsets.get(arg_id)
+            if offset_val and offset_val.isInterval():
+                offset = offset_val.getInterval()
+            else:
+                offset = pysvf.IntervalValue(0, 0)
+                
+            if offset.isTop() or int(offset.lb()) != 0 or int(offset.ub()) != 0:
+                msg = f"Bad Free detected: Attempting to free inner pointer at offset {offset}"
+                self.buf_overflow_helper.reportBadFree(extCallNode, msg)
+                self.results["badfree"].append(extCallNode)
+                return 
             
             if arg_val.isAddr():
                 for addr in arg_val.getAddrs():
@@ -2047,15 +2381,10 @@ class AbstractExecution:
                         continue
 
                     obj_id = abstract_state.getIDFromAddr(addr)
-                    obj_var = self.svfir.getGNode(obj_id)
                     base_obj = self.svfir.getBaseObject(obj_id)
 
-                     # Must originate from a heap object
                     if base_obj is None or not base_obj.isHeap():
-                        msg = (
-                            f"Free_Memory_Not_on_Heap: "
-                            f"Attempting to free non-heap address {addr}"
-                        )
+                        msg = f"Free_Memory_Not_on_Heap: Attempting to free non-heap address {addr}"
                         self.buf_overflow_helper.reportBadFree(extCallNode, msg)
                         self.results["badfree"].append(extCallNode)
                         continue
@@ -2067,9 +2396,7 @@ class AbstractExecution:
 
                     if lifetime == Lifetime.FREED:
                         msg = f"Double free detected on address {addr}"
-                        self.buf_overflow_helper.reportDoubleFree(
-                            extCallNode, msg
-                        )
+                        self.buf_overflow_helper.reportDoubleFree(extCallNode, msg)
                         self.results["doublefree"].append(extCallNode)
                         continue
 
@@ -2098,55 +2425,91 @@ class AbstractExecution:
         head = cycle.head.node
         increasing = True
         iteration = 0
-        widen_delay = self.widen_delay  # Use class member for widen delay
+        narrowing_iters = 0
+        MAX_NARROWING = 10
+        widen_delay = self.widen_delay 
 
         while True:
-            # Get the abstract state of the cycle head 
-            # pre_iteration_as is the postAbsTrace[head] of the cycle head before the current iteration
-            # cur_iteration_as is the postAbsTrace[head] of the cycle head at the current iteration
+            # 1. Snapshot previous state
             pre_iteration_as = self.post_abs_trace[head] if head in self.post_abs_trace else None
-            pre_iteration_lifetime = (self.post_lifetime_trace.get(head, {}).copy()) 
+            pre_iteration_lifetime = self.post_lifetime_trace.get(head, {}).copy()
+            
+            pre_iteration_ptr_offsets = {}
+            if head in self.post_ptr_offset_trace:
+                for k, v in self.post_ptr_offset_trace[head].items():
+                    pre_iteration_ptr_offsets[k] = v.clone()
 
-            self.handleICFGNode(head)  # Handle the cycle head node
+            # 2. Evaluate head node
+            self.handleICFGNode(head) 
+            
             if head not in self.post_abs_trace:
                 if head not in self.infeasible_nodes:
                     self.recordGap(f"cycle head {head.getId()} had no feasible state")
                 break
+                
             cur_iteration_as = self.post_abs_trace[head]
-            cur_iteration_lifetime = (self.post_lifetime_trace.get(head, {}).copy())
+            cur_iteration_lifetime = self.post_lifetime_trace.get(head, {}).copy()
+            cur_iteration_ptr_offsets = self.post_ptr_offset_trace.get(head, {})
 
+            # 3. Widening / Narrowing Logic
             if iteration >= widen_delay and pre_iteration_as is not None:
                 if increasing:
-                    # widening
+                    # --- WIDENING PHASE ---
                     self.post_abs_trace[head] = pre_iteration_as.widening(cur_iteration_as)
-                    abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
+                    
+                    ptr_stable = True
+                    # If sizes differ, new variables were tracked
+                    if len(pre_iteration_ptr_offsets) != len(cur_iteration_ptr_offsets):
+                        ptr_stable = False
+                        
+                    for vid, cur_val in cur_iteration_ptr_offsets.items():
+                        pre_val = pre_iteration_ptr_offsets.get(vid)
+                        
+                        # If it was already widened to Top, it stays stable
+                        if pre_val is not None and pre_val.getInterval().isTop():
+                            self.post_ptr_offset_trace[head][vid] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+                        # If it differs or is new, widen to Top
+                        elif pre_val is None or not cur_val.getInterval().equals(pre_val.getInterval()):
+                            self.post_ptr_offset_trace[head][vid] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+                            ptr_stable = False
 
+                    abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
 
-                    if abs_stable and lifetime_stable:
+                    if abs_stable and lifetime_stable and ptr_stable:
                         increasing = False
-                        continue
+                        narrowing_iters = 0
+                  
                 else:
-                    # narrowing
+                    # --- NARROWING PHASE ---
                     self.post_abs_trace[head] = pre_iteration_as.narrowing(cur_iteration_as)
-                    abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
+                    
+                    # Pointer offsets stay at widened Top state during narrowing
+                    for k, v in pre_iteration_ptr_offsets.items():
+                        self.post_ptr_offset_trace[head][k] = v.clone()
+                    ptr_stable = True
 
+                    abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
 
-                    if abs_stable and lifetime_stable:
+                    if abs_stable and lifetime_stable and ptr_stable:
                         break
-
-            # Handle the cycle components	
-            for comp in cycle.components:
-                if isinstance(comp, ICFGWTONode):
-                    self.handleICFGNode(comp.node)
-                elif isinstance(comp, ICFGWTOCycle):
-                    # Handle the sub cycle (nested cycle)
-                    self.handleICFGCycle(comp)
+                    
+                    narrowing_iters += 1
+                    if narrowing_iters > MAX_NARROWING:
+                        # Hard stop to prevent infinite narrowing oscillations
+                        break
+            
+            # 4. Evaluate sub-components cleanly using the WTO structure
+            self.handleWtoComponents(cycle.components)
 
             iteration += 1
     
+    
     def checkMemorySafety(self, node: pysvf.ICFGNode, ptr_id: int):
+        if node not in self.post_abs_trace:
+            return
+            
         abstract_state = self.post_abs_trace[node]
         lifetime_state = self.post_lifetime_trace.get(node, {})
         ptr_val = abstract_state.getVar(ptr_id)
@@ -2217,7 +2580,4 @@ class AbstractExecution:
                 msg = f"Use After Free detected. Must access freed addresses {addrs}."
                 self.buf_overflow_helper.reportUseAfterFree(node, msg)
                 self.results["useafterfree"].append(node)
-
-
-
 
