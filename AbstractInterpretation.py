@@ -2542,6 +2542,3 @@ class AbstractExecution:
                 self.buf_overflow_helper.reportUseAfterFree(node, msg)
                 self.results["useafterfree"].append(node)
 
-
-
-
