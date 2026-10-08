@@ -90,6 +90,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # working_file.close()
         fail("ERROR(CLANG)", retcode)
 
+    log("Hello Tselmeg1")
+
     try:
         # This code is copied from python/test-ae.py to use SVF
         pysvf.buildSVFModule(str(working_file_path))
@@ -100,6 +102,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log_exception(e)
         # working_file.close()
         fail("ERROR(SVF)")
+
+    log("Hello Tselmeg2")
 
     # parse input prop file path to find the file name
     prop_file_name = prop_file_path.split('/')[-1]
@@ -114,6 +118,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log_exception(e)
         # working_file.close()
         fail("ERROR(AE)")
+
+    log("Hello Tselmeg3")
 
     if prop_file_name == 'unreach-call.prp':
         feasible_ids = set()
@@ -195,6 +201,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     elif prop_file_name == 'valid-memsafety.prp':
         # This property file bundles valid-deref, valid-free, and valid-memtrack.
         # We check our arrays in order and fail if any of them detected a violation.
+
+        log("Hello Tselmeg4")
         
         if len(ae.results.get("nulldereference", [])) > 0:
             print("MEMORY Incorrect(valid-deref)")
@@ -245,6 +253,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
     # working_file.close()
     pysvf.releasePAG()
+
+    log("Hello Tselmeg5")
 
 
 if __name__ == "__main__":
