@@ -15,7 +15,7 @@ runtime_files=(
     svf_run.py
     util.py
     LICENSE.TXT
-    README.MD
+    README.md
     smoketest.sh
     tests/basic_reach.c
     tests/cfl_test2.c
