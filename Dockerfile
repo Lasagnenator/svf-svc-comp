@@ -75,6 +75,8 @@ RUN ln -sfn \
     "${PYSVF_ROOT}/Release-build/lib/libLLVM.so.21.1"
 
 # Fetch and build this repository
+RUN mkdir -p ${APP_DIR}
+RUN chown svf:svf ${APP_DIR}
 WORKDIR ${APP_DIR}
 COPY --chown=svf:svf . .
 # No build step required currently.
