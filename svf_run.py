@@ -128,11 +128,12 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                          if node is not None}
         # Only a gap if the holding function was never analysed; otherwise the guard was pruned.
         analysed = getattr(ae, "visited", set())
+        proven_dead = getattr(ae, "unreachable_nodes", set())
         unreached = set()
         for n in pag.getICFG().getNodes():
             if not isinstance(n, pysvf.CallICFGNode) or n.getId() not in icfg_sites:
                 continue
-            if n.getId() in visited_sites:
+            if n.getId() in visited_sites or n in proven_dead:
                 continue
             holder = n.getFun().getName() if n.getFun() else None
             if holder is None or holder not in analysed:
