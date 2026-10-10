@@ -168,6 +168,7 @@ class Result:
     error_message: str | None
     log_path: str
     rerun_command: str
+    peak_memory_mib: float | None = None
 
 
 def parse_sample(value):
@@ -432,6 +433,30 @@ def sample_tasks(tasks, percent, seed, count=None):
     return sorted(selected, key=lambda task: stable_rank(task, seed))
 
 
+class MeasuredPopen(subprocess.Popen):
+    """Collect per-child peak RSS through the POSIX Popen wait hooks."""
+
+    def __init__(self, *args, **kwargs):
+        self.peak_memory_mib = None
+        super().__init__(*args, **kwargs)
+
+    def _wait_with_usage(self, pid, wait_flags):
+        waited_pid, status, usage = os.wait4(pid, wait_flags)
+        if waited_pid == self.pid:
+            divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+            self.peak_memory_mib = usage.ru_maxrss / divisor
+        return waited_pid, status
+
+    def _try_wait(self, wait_flags):
+        try:
+            return self._wait_with_usage(self.pid, wait_flags)
+        except ChildProcessError:
+            return self.pid, 0
+
+    def _internal_poll(self, _deadstate=None):
+        return super()._internal_poll(_deadstate, _waitpid=self._wait_with_usage)
+
+
 def limit_resources(cpu_seconds, memory_bytes):
     os.setsid()
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
@@ -621,7 +646,7 @@ def run_task(task, args, logs_dir):
     return_code = None
     process = None
     try:
-        process = subprocess.Popen(
+        process = MeasuredPopen(
             command, cwd=yaml_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, errors="replace",
             preexec_fn=lambda: limit_resources(args.cpu_limit, args.memory_limit_mib * 1024 * 1024),
@@ -647,6 +672,7 @@ def run_task(task, args, logs_dir):
     except Exception as error:
         stdout, stderr = "", f"runner failed to start tool: {error!r}"
     wall_seconds = time.monotonic() - started
+    peak_memory_mib = process.peak_memory_mib if process is not None else None
     answer, classification, error_code, error_message, termination_reason, signal_name, reported = classify(
         stdout, stderr, return_code, timed_out)
     validation = validate_witness(
@@ -654,7 +680,8 @@ def run_task(task, args, logs_dir):
     score = SCORE.get((task.expected, answer), 0)
     log_path.write_text(
         f"command: {rerun}\ncwd: {yaml_dir}\nreturn_code: {return_code}\n"
-        f"wall_seconds: {wall_seconds:.6f}\n\n===== STDOUT =====\n{stdout}"
+        f"wall_seconds: {wall_seconds:.6f}\npeak_memory_mib: {peak_memory_mib}\n"
+        f"\n===== STDOUT =====\n{stdout}"
         f"\n===== STDERR =====\n{stderr}", errors="replace")
     return Result(
         run_id=task.run_id, task_file=task.yaml_relative, category=task.category,
@@ -667,7 +694,7 @@ def run_task(task, args, logs_dir):
         witness_path=str(witness_path) if witness_path.is_file() else None,
         return_code=return_code,
         termination_reason=termination_reason, signal=signal_name,
-        wall_seconds=wall_seconds, error_code=error_code,
+        wall_seconds=wall_seconds, peak_memory_mib=peak_memory_mib, error_code=error_code,
         error_message=error_message, log_path=str(log_path), rerun_command=rerun,
     )
 
@@ -860,6 +887,7 @@ def main(argv=None):
             "memory_mib": args.memory_limit_mib,
         },
         "resource_backend": "POSIX process group with per-process rlimits and a runner wall timeout",
+        "memory_measurement": "wait4 peak RSS (including waited-for descendants); not aggregate process-tree memory or virtual address space; excludes witness validation",
         "validator_command": args.validator_command,
         "validation_results_supplied": len(args.validation_results),
         "population": len(tasks),
@@ -899,9 +927,14 @@ def main(argv=None):
                 stream.write(json.dumps(asdict(result)) + "\n")
                 stream.flush()
                 status = "OK" if result.answer == str(result.expected).lower() else result.classification.upper()
-                print(f"[{index}/{len(selected)}] {status:<10} {result.score:+3d} "
-                      f"score={sum(item.score for item in results):+d} "
-                      f"{result.wall_seconds:.2f}s {task.yaml_relative}::{task.property_name}")
+                memory = "peak RSS unavailable"
+                if result.peak_memory_mib is not None:
+                    memory = f"{result.peak_memory_mib:.1f} MiB peak RSS"
+                print(
+                    f"[{index}/{len(selected)}] {status:<10} {result.score:+3d} "
+                    f"score={sum(item.score for item in results):+d} "
+                    f"{result.wall_seconds:.2f}s {memory} {task.yaml_relative}::{task.property_name}"
+                )
                 if result.classification in {"tool_error", "timeout", "unsupported"}:
                     print(f"  log: {result.log_path}", file=sys.stderr)
                     print(f"  rerun: {result.rerun_command}", file=sys.stderr)

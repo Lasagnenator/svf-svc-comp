@@ -3,6 +3,7 @@ Run unit tests with:
 python -m unittest tests.test_tester -v
 """
 
+import csv
 import json
 from pathlib import Path
 import subprocess
@@ -119,6 +120,25 @@ class WitnessExportTests(unittest.TestCase):
 
 
 class TesterUnitTests(unittest.TestCase):
+    def test_peak_memory_is_per_run_and_captured_by_poll(self):
+        peaks = []
+        for allocation in (96 * 1024 * 1024, 0):
+            with tester.MeasuredPopen(
+                    [sys.executable, "-c", f"data = bytearray({allocation})"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                process.communicate(timeout=10)
+                self.assertEqual(process.poll(), 0)
+                self.assertIsNotNone(process.peak_memory_mib)
+                peaks.append(process.peak_memory_mib)
+        self.assertGreater(peaks[0], peaks[1] + 32)
+
+        with tester.MeasuredPopen([sys.executable, "-c", "pass"]) as process:
+            with mock.patch.object(tester.os, "wait4", wraps=tester.os.wait4) as wait:
+                process._internal_poll()
+                wait.assert_called_once_with(process.pid, tester.os.WNOHANG)
+            process.wait(timeout=10)
+            self.assertGreater(process.peak_memory_mib, 0)
+
     def make_task(self, identity, property_name="reach", data_model="LP64", expected=True):
         return tester.Task(
             identity, Path(f"/corpus/c/group/{identity}.yml"),
@@ -219,6 +239,7 @@ class TesterUnitTests(unittest.TestCase):
                                    memory_limit_mib=64)
             result = tester.run_task(task, args, root)
             self.assertEqual(result.classification, "unsupported")
+            self.assertIsNone(result.peak_memory_mib)
             self.assertEqual(result.error_code, "MULTIPLE_INPUTS")
             self.assertIsNotNone(result.error_message)
             assert result.error_message is not None
@@ -415,9 +436,10 @@ print(answers[name])
         self.temp.cleanup()
 
     def test_end_to_end_score_and_error_artifacts(self):
+        csv_path = self.base / "results.csv"
         process = subprocess.run(
             [sys.executable, str(TESTER_PATH), str(self.corpus), str(self.tool),
-             "--reach", "--results-dir", str(self.results)],
+             "--reach", "--results-dir", str(self.results), "--output", str(csv_path)],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
@@ -427,6 +449,14 @@ print(answers[name])
         self.assertEqual(summary["maximum_selected_score"], 8)
         self.assertEqual(summary["counts"], {"correct": 2, "wrong": 2, "tool_error": 1})
         self.assertEqual(len(records), 5)
+        for record in records:
+            self.assertGreater(record["peak_memory_mib"], 0)
+            self.assertIn("peak_memory_mib:", Path(record["log_path"]).read_text())
+        self.assertIn("MiB peak RSS", process.stdout)
+        with csv_path.open() as stream:
+            csv_records = list(csv.DictReader(stream))
+        self.assertEqual([float(record["peak_memory_mib"]) for record in csv_records],
+                         [record["peak_memory_mib"] for record in records])
         error = next(record for record in records if record["classification"] == "tool_error")
         self.assertEqual(error["error_code"], "ERROR(AE)")
         self.assertIn("getElementIndex", error["error_message"])
@@ -573,6 +603,7 @@ print(answers[name])
         self.assertEqual(record["classification"], "timeout")
         self.assertEqual(record["termination_reason"], "wall_timeout")
         self.assertEqual(record["score"], 0)
+        self.assertGreater(record["peak_memory_mib"], 0)
 
 
 if __name__ == "__main__":
