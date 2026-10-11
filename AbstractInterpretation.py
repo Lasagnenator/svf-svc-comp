@@ -498,6 +498,8 @@ class AbstractExecution:
         self.visited = set()
         # Nodes handleICFGNode visited and proved infeasible.
         self.infeasible_nodes = set()
+        # (node, result var) of comparisons we had no model for; deduped
+        self.unmodelled_cmps = set()
         # Nodes that reached the merge with no predecessor state.
         self.orphan_nodes = set()
         # Stores unreachable nodes -> nodes proven dead
@@ -706,8 +708,9 @@ class AbstractExecution:
 
         if isinstance(node, pysvf.CallICFGNode):
             callNode = node.asCall()
-            called_func = callNode.getCalledFunction()
-            if called_func is not None and called_func.getName() == "reach_error":
+            # An indirect call SVF could not resolve has no callee
+            callee = callNode.getCalledFunction()
+            if callee is not None and callee.getName() == "reach_error":
                 self.results["reach"].append((is_feasible, callNode))
 
         if not is_feasible:
@@ -779,6 +782,19 @@ class AbstractExecution:
         "__assert_fail", "__assert", "__assert_perror_fail",
         "reach_error", "__VERIFIER_error",
     }
+
+    # Externals that write to a stream and never to program memory. The
+    # exception is printf("%n"), which SV-COMP tasks do not use. Anything that writes
+    # through a pointer argument (sprintf, snprintf, memcpy, scanf) must stay out.
+    PURE_EXTERNALS = {
+        "printf", "fprintf", "vprintf", "vfprintf", "puts", "fputs", "putchar",
+        "fputc", "putc", "fflush", "perror",
+    }
+
+    # The SV-COMP harness writes every input constraint as assume_abort_if_not(cond):
+    # the callee aborts unless cond holds, so any continuation in the caller implies it
+    # did.
+    ASSUME_HELPERS = {"assume_abort_if_not", "__VERIFIER_assume"}
 
     # Memory functions, modelled assuming the program is memory safe
     MEMORY_EXTERNALS = ("malloc", "llvm.stacksave", "llvm.stackrestore", "llvm.memcpy")
@@ -877,11 +893,57 @@ class AbstractExecution:
             self.post_lifetime_trace.get(node, {}).copy()
         )
 
+    def cmpVarBehind(self, var, depth: int = 4):
+        """Walk back through value-preserving copies to the comparison that produced `var`.
+        Returns None if no comparison is found (no narrowing is possible).
+
+        Used by applyAssumption for ASSUME_HELPERS such as __VERIFIER_assume(x < 5). Clang
+        widens the i1 compare to the parameter's type, so the call argument is a CopyStmt
+        rather than a CmpStmt. zext of an i1 is 0 or 1 and sext is 0 or -1, so in both cases
+        "argument is non-zero" is exactly "the comparison held".
+        """
+        for _ in range(depth):
+            if var is None:
+                return None
+            edges = var.getInEdges()
+            if not edges:
+                return None
+            edge = edges[0]
+            if isinstance(edge, pysvf.CmpStmt):
+                return var
+            if isinstance(edge, pysvf.CopyStmt) and (
+                    edge.isZext() or edge.isSext() or edge.isValueCopy()):
+                var = edge.getRHSVar()
+                continue
+            return None
+        return None
+
+    def applyAssumption(self, node: pysvf.CallICFGNode) -> bool:
+        """Apply an assume helper's constraint to the *caller's* state.
+        Returns False when the assumption cannot hold, i.e. the helper aborts on every
+        path in, so the code after the call is dead.
+        """
+        if node not in self.post_abs_trace:
+            # Fail safe case
+            return True
+        parms = node.getActualParms()
+        if len(parms) != 1:
+            return True
+        cmp_var = self.cmpVarBehind(parms[0])
+        if cmp_var is None:
+            # Not a comparison we can take apart -- an already-widened flag, a phi merge
+            # from `&&` (3.4), or a call result. Sound, just no narrowing.
+            return True
+        if self.refineOnBranch(cmp_var, 1, self.post_abs_trace[node]):
+            return True
+        self.markCallNeverReturns(node)
+        return False
+
     def handleCallSite(self, node: pysvf.CallICFGNode):
-        called_func = node.getCalledFunction()
+        callee = node.getCalledFunction()
         
         # Handle Indirect Calls
-        if called_func is None:
+        if callee is None:
             has_indirect = False
             for edge in node.getOutEdges():
                 # Identify interprocedural call edges
@@ -901,15 +963,24 @@ class AbstractExecution:
                             self.resumeAfterUnanalysedCall(node)
             
             if not has_indirect:
+                # Unresolved indirect call: there is no callee to walk, so this is a dropped path
+                # rather than a no-op and recorded.
+                self.recordGap(f"unresolved indirect call at node {node.getId()}")
+                self.resumeAfterUnanalysedCall(node)
                 if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                     lhs_id = node.getRetICFGNode().getActualRet().getId()
                     self.post_abs_trace[node][lhs_id] = pysvf.AbstractValue(pysvf.IntervalValue.top())
             return
             
         # Handle Direct Calls
-        fun_name = called_func.getName()
+        fun_name = callee.getName()
         print(fun_name)
         
+        # Narrow the caller before the body is walked; the body is then analysed as usual,
+        # because the return node takes its state from the callee's exit.
+        if fun_name in self.ASSUME_HELPERS and not self.applyAssumption(node):
+            return
+
         if fun_name in ["OVERFLOW", "svf_assert", "svf_assert_eq"]:
             self.handleStubFunction(node)
         elif fun_name in ["nd", "rand"]:
@@ -918,21 +989,29 @@ class AbstractExecution:
                 self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
         elif fun_name in ["mem_insert", "str_insert", "malloc", "free", "calloc", "realloc"]: 
             self.updateStateOnExtCall(node)
-        elif pysvf.isExtCall(called_func):
+        elif pysvf.isExtCall(callee):
+            # The body is never walked, so the callee's exit gets no state,
+            # deal with it here.
             if fun_name in self.SAFE_EXTERNALS:
                 self.markCallNeverReturns(node)
+            elif fun_name in self.ASSUME_HELPERS:
+                # applyAssumption has already applied to the caller's state: resume with it, no gap.
+                self.resumeAfterUnanalysedCall(node)
+            elif fun_name in self.PURE_EXTERNALS:
+                # No effect on program memory: resume with the caller's state, no gap.
+                self.resumeAfterUnanalysedCall(node)
             elif self.isMemoryExternal(fun_name):
                 self.handleMemoryCall(node, fun_name)
             else:
                 self.recordGap(f"external call not modelled: {fun_name}")
                 self.resumeAfterUnanalysedCall(node)
         # Break direct recursive cycles using absolute string identity
-        elif called_func in self.recursive_funs or fun_name in self.call_site_stack:
+        elif callee in self.recursive_funs or fun_name in self.call_site_stack:
             self.recordGap(f"recursive function body not analysed: {fun_name}")
             self.resumeAfterUnanalysedCall(node)
             return
         else:
-            fun_entry = self.svfir.getICFG().getFunEntryICFGNode(called_func)
+            fun_entry = self.svfir.getICFG().getFunEntryICFGNode(callee)
             old_entry_state = self.post_abs_trace.get(fun_entry)
             
             # Fast-path: Only analyze the callee if the incoming state shifted
@@ -1623,6 +1702,25 @@ class AbstractExecution:
             return (lhs < rhs)
         return (lhs <= rhs)
 
+    @staticmethod
+    def valueKind(value) -> str:
+        if value.isInterval():
+            return "interval"
+        if value.isAddr():
+            return "address"
+        return "unset"
+
+    def unmodelledCompare(self, node, cmp, v0, v1):
+        """A comparison we have no model for: an interval against an address, an operand
+        that was never written, or a predicate missing from the chain.
+        """
+        key = (node.getId(), cmp.getResId())
+        if key not in self.unmodelled_cmps:
+            self.unmodelled_cmps.add(key)
+            self.recordGap(f"unmodelled comparison at node {node.getId()}: "
+                           f"{self.valueKind(v0)} vs {self.valueKind(v1)}")
+        return IntervalValue(0, 1)
+
     def updateStateOnCmp(self, cmp: pysvf.CmpStmt):
         node = cmp.getICFGNode()
         abstract_state = self.post_abs_trace[node]
@@ -1630,7 +1728,13 @@ class AbstractExecution:
         op0 = cmp.getOpVar(0)
         op1 = cmp.getOpVar(1)
         res = cmp.getResId()
-        if abstract_state.getVar(op0.getId()).isInterval() and abstract_state.getVar(op1.getId()).isInterval():
+
+        # Both guards below require the two operands to be the *same* kind.
+        v0 = abstract_state.getVar(op0.getId())
+        v1 = abstract_state.getVar(op1.getId())
+        if v0.isInterval() and v1.isInterval():
+            ###SVF SV-COMP-ADDITION
+            # Was IntervalValue(0) -- "definitely false"; [0,1] is the sound default.
             res_val = IntervalValue(0, 1)
         
         #Check both op0 and op1 instead of just op0
@@ -1664,9 +1768,8 @@ class AbstractExecution:
             elif predicate == Predicate.FCMP_TRUE:
                 res_val = IntervalValue(1,1)
             abstract_state[res] = AbstractValue(res_val)
-
-        elif is_op0_addr and is_op1_addr:
-            res_val = IntervalValue.top()
+        elif v0.isAddr() and v1.isAddr():
+            res_val = None
             lhs = abstract_state[op0.getId()]
             rhs = abstract_state[op1.getId()]
             predicate = cmp.getPredicate()
@@ -1719,11 +1822,15 @@ class AbstractExecution:
             elif predicate == Predicate.FCMP_TRUE:
                 res_val = IntervalValue(1, 1)
 
-            # FIX: Properly wrap into AbstractValue
-            abstract_state[res] = AbstractValue(res_val)
+            # Mixed operand type compare, marked
+            else:
+                res_val = self.unmodelledCompare(node, cmp, v0, v1)
+
+            abstract_state[res] = res_val
         else:
-            # Fallback for mixed/top types (e.g., Address checked against literal 0 fallback)
-            abstract_state[res] = AbstractValue(IntervalValue.top())
+            # Mixed operand type compare, marked
+            abstract_state[res] = AbstractValue(
+                self.unmodelledCompare(node, cmp, v0, v1))
 
 
 
