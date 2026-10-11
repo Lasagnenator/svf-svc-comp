@@ -133,7 +133,7 @@ class TesterUnitTests(unittest.TestCase):
         cleanup = self.make_task("cleanup", property_name="cleanup")
         overflow = self.make_task("overflow", property_name="overflow")
         self.assertTrue(tester.score_eligible(ilp32))
-        self.assertFalse(tester.score_eligible(safety))
+        self.assertTrue(tester.score_eligible(safety))
         self.assertFalse(tester.score_eligible(cleanup))
         self.assertFalse(tester.score_eligible(overflow))
         unsupported = tester.unsupported_reason(overflow)

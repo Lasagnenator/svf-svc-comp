@@ -78,6 +78,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         working_file.close()
         fail("ERROR(CLANG)", retcode)
 
+
     try:
         # This code is copied from python/test-ae.py to use SVF
         pysvf.buildSVFModule(working_file.name)
@@ -87,6 +88,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log_exception(e)
         working_file.close()
         fail("ERROR(SVF)")
+
 
     # parse input prop file path to find the file name
     prop_file_name = prop_file_path.split('/')[-1]
@@ -101,6 +103,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log_exception(e)
         working_file.close()
         fail("ERROR(AE)")
+
 
     if prop_file_name == 'unreach-call.prp':
         feasible_ids = set()
@@ -178,6 +181,39 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             correctness = "Incorrect"
         else:
             print("OVERFLOW Correct")
+            correctness = "Correct"
+            
+    elif prop_file_name == 'valid-memsafety.prp':
+        # This property file bundles valid-deref, valid-free, and valid-memtrack.
+        # We check our arrays in order and fail if any of them detected a violation.
+        
+        if len(ae.results.get("nulldereference", [])) > 0:
+            print("MEMORY Incorrect(valid-deref)")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
+            print("MEMORY Incorrect(valid-free)")
+            correctness = "Incorrect"
+            
+        elif len(ae.results.get("memoryleak", [])) > 0:
+            print("MEMORY Incorrect(valid-memtrack)")
+            correctness = "Incorrect"
+        elif len(ae.results.get("badfree", [])) > 0:
+            print("MEMORY Incorrect(valid-free)")
+            correctness = "Incorrect"
+            
+        else:
+            print("MEMORY Correct")
+            correctness = "Correct"
+
+    elif prop_file_name == 'valid-memcleanup.prp':
+        # Memcleanup requires all memory to be explicitly freed before exit.
+        # Our memory leak detector at the end of main() handles this perfectly.
+        if len(ae.results.get("memoryleak", [])) > 0:
+            print("CLEANUP Incorrect")
+            correctness = "Incorrect"
+        else:
+            print("CLEANUP Correct")
             correctness = "Correct"
 
     else:
