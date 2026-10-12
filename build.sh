@@ -34,6 +34,7 @@ mkdir -p "$package/tests"
 python3 -m pip install \
     --disable-pip-version-check \
     --no-cache-dir \
+    --no-compile \
     --only-binary=:all: \
     --python-version "$python_version" \
     --target "$package" \
