@@ -1,12 +1,3 @@
-# pysvf's bundled LLVM and SVF binaries link libxml2.so.2, which Ubuntu 26.04 replaced
-# with the ABI-incompatible libxml2.so.16. Take the old library and its ICU from 24.04.
-FROM ubuntu:24.04 AS libxml2-compat
-RUN apt-get update && apt-get install -y --no-install-recommends libxml2 \
-    && mkdir /compat \
-    && cp -L /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
-             /usr/lib/x86_64-linux-gnu/libicuuc.so.74 \
-             /usr/lib/x86_64-linux-gnu/libicudata.so.74 /compat/
-
 FROM ubuntu:26.04
 
 # Stop ubuntu-20 interactive options.
@@ -46,33 +37,29 @@ CMD ["/usr/sbin/sshd", "-D"]
 
 
 # Define dependencies.
-ENV lib_deps="cmake g++ gcc clang-21 llvm-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="clang-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
+ENV runtime="python3 python3-venv"
 
 # Fetch dependencies.
 RUN apt-get update --fix-missing
-RUN apt-get install -y --no-install-recommends $build_deps $lib_deps
+RUN apt-get install -y --no-install-recommends $build_deps $lib_deps ${runtime}
 
-# pysvf only ships wheels up to CPython 3.12, but Ubuntu 26.04 only has 3.14,
-# so uv provides a standalone 3.12. Keep it outside /root so the svf user can run it.
-RUN apt-get update && apt-get install -y python3
-COPY --from=libxml2-compat /compat/ /opt/compat-libs/
-RUN echo /opt/compat-libs > /etc/ld.so.conf.d/pysvf-compat.conf && ldconfig
-COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_LINK_MODE=copy UV_NO_CACHE=1
 COPY requirements.txt /tmp/requirements.txt
-RUN uv venv --python 3.12 /opt/venv
-RUN uv pip install --python /opt/venv/bin/python -r /tmp/requirements.txt
+COPY dist/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl /tmp/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl
+RUN python3 -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN echo 'export PATH="/opt/venv/bin:$PATH"' >> /etc/profile
+RUN pip install /tmp/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl
+RUN pip install pyyaml
 
 
 # Fix SABER's missing import
-ENV PYSVF_ROOT=/opt/venv/lib/python3.12/site-packages/pysvf/SVF
-RUN ln -sfn \
-    "${PYSVF_ROOT}/llvm-21.1.0.obj/lib/libLLVM.so" \
-    "${PYSVF_ROOT}/Release-build/lib/libLLVM.so.21.1"
+#ENV PYSVF_ROOT=/opt/venv/lib/python3.14/site-packages/pysvf/SVF
+#RUN ln -sfn \
+#    "${PYSVF_ROOT}/llvm-21.1.0.obj/lib/libLLVM.so" \
+#    "${PYSVF_ROOT}/Release-build/lib/libLLVM.so.21.1"
 
 # Fetch and build this repository
 RUN mkdir -p ${APP_DIR}

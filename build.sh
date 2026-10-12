@@ -25,7 +25,7 @@ runtime_files=(
 )
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
-python_version="3.12"
+python_version="3.14"
 
 rm -rf "$package" "$archive"
 mkdir -p "$package"
@@ -37,7 +37,7 @@ python3 -m pip install \
     --only-binary=:all: \
     --python-version "$python_version" \
     --target "$package" \
-    -r "$root/requirements.txt"
+    "$dist/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl" pyyaml
 
 for file in "${runtime_files[@]}"; do
     cp "$root/$file" "$package/$file"
@@ -46,10 +46,10 @@ chmod 755 "$package/svf_run.py"
 chmod 755 "$package/smoketest.sh"
 
 # Fix SABER's import
-pysvf_root="$package/pysvf/SVF"
-cp -f \
-    "$pysvf_root/llvm-21.1.0.obj/lib/libLLVM.so" \
-    "$pysvf_root/Release-build/lib/libLLVM.so.21.1"
+#pysvf_root="$package/pysvf/SVF"
+#cp -f \
+#    "$pysvf_root/llvm-21.1.0.obj/lib/libLLVM.so" \
+#    "$pysvf_root/Release-build/lib/libLLVM.so.21.1"
 
 # Memory analysis invokes these bundled executables and preloads bundled LLVM.
 # Check that files are executable.
