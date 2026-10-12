@@ -46,13 +46,7 @@ done
 chmod 755 "$package/svf_run.py"
 chmod 755 "$package/smoketest.sh"
 
-# Fix SABER's import
-#pysvf_root="$package/pysvf/SVF"
-#cp -f \
-#    "$pysvf_root/llvm-21.1.0.obj/lib/libLLVM.so" \
-#    "$pysvf_root/Release-build/lib/libLLVM.so.21.1"
-
-# Memory analysis invokes these bundled executables and preloads bundled LLVM.
+# Memory analysis invokes these bundled executables.
 # Check that files are executable.
 test -x "$package/pysvf/SVF/Release-build/bin/ae"
 test -x "$package/pysvf/SVF/Release-build/bin/saber"

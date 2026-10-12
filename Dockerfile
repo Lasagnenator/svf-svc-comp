@@ -52,13 +52,6 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN echo 'export PATH="/opt/venv/bin:$PATH"' >> /etc/profile
 RUN pip install -r /tmp/requirements.txt
 
-
-# Fix SABER's missing import
-#ENV PYSVF_ROOT=/opt/venv/lib/python3.14/site-packages/pysvf/SVF
-#RUN ln -sfn \
-#    "${PYSVF_ROOT}/llvm-21.1.0.obj/lib/libLLVM.so" \
-#    "${PYSVF_ROOT}/Release-build/lib/libLLVM.so.21.1"
-
 # Fetch and build this repository
 RUN mkdir -p ${APP_DIR}
 RUN chown svf:svf ${APP_DIR}
