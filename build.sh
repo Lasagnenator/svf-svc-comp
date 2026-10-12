@@ -38,7 +38,7 @@ python3 -m pip install \
     --only-binary=:all: \
     --python-version "$python_version" \
     --target "$package" \
-    "$dist/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl" pyyaml
+    -r "$root/requirements.txt"
 
 for file in "${runtime_files[@]}"; do
     cp "$root/$file" "$package/$file"

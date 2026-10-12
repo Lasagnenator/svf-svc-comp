@@ -43,16 +43,14 @@ ENV runtime="python3 python3-venv"
 
 # Fetch dependencies.
 RUN apt-get update --fix-missing
-RUN apt-get install -y --no-install-recommends $build_deps $lib_deps ${runtime}
+RUN apt-get install -y --no-install-recommends $build_deps $lib_deps $runtime
 
 COPY requirements.txt /tmp/requirements.txt
-COPY dist/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl /tmp/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl
 RUN python3 -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 RUN echo 'export PATH="/opt/venv/bin:$PATH"' >> /etc/profile
-RUN pip install /tmp/pysvf-0.0.0-cp314-cp314-linux_x86_64.whl
-RUN pip install pyyaml
+RUN pip install -r /tmp/requirements.txt
 
 
 # Fix SABER's missing import
