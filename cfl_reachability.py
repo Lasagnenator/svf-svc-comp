@@ -11,7 +11,7 @@ class CFLreachability:
         # main function
         main_fun = self.svfir.getFunObjVar("main")
         entry = self.icfg.getFunEntryICFGNode(main_fun)
-        self.worklist.append((entry, ()))
+        self.worklist.append((entry, (), ("main",)))
         # remain codes
         self.run()
         return self.results
@@ -20,8 +20,8 @@ class CFLreachability:
         # repeat until worklist is empty (all functions processed)
         while self.worklist:
             # get the first function from worklist
-            node, stack = self.worklist.pop(0)
-            state_key = (node.getId(), stack)
+            node, stack, function_stack = self.worklist.pop(0)
+            state_key = (node.getId(), stack, function_stack)
             # skip if already visited
             if state_key in self.visited:
                 continue
@@ -38,13 +38,21 @@ class CFLreachability:
                 # handle internal calls
                 # we don't need to handle external calls
                 if callee and not pysvf.isExtCall(callee):
+                    callee_name = callee.getName()
+                    if callee_name in function_stack:
+                        ret_node = node.getRetICFGNode()
+                        for e in ret_node.getOutEdges():
+                            self.worklist.append((e.getDstNode(), stack, function_stack))
+                        continue
+
                     # push stack
                     callsite_id = node.getId()
                     new_stack = stack + (callsite_id,)
 
                     # jump to callee entry
                     entry = self.icfg.getFunEntryICFGNode(callee)
-                    self.worklist.append((entry, new_stack))
+                    new_function_stack = function_stack + (callee_name,)
+                    self.worklist.append((entry, new_stack, new_function_stack))
                 continue
             # -------------------------------------------------
             # handle Ret node
@@ -61,15 +69,15 @@ class CFLreachability:
                 if not callnode or top != callnode.getId():
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
-
+                new_function_stack = function_stack[:-1]
                 # handle the nodes after return the current function
                 for e in node.getOutEdges():
                     dst = e.getDstNode()
-                    self.worklist.append((dst, new_stack))
+                    self.worklist.append((dst, new_stack, new_function_stack))
 
             # -------------------------------------------------
             # handle normal node
             else:
                 for e in node.getOutEdges():
                     dst = e.getDstNode()
-                    self.worklist.append((dst, stack))
+                    self.worklist.append((dst, stack, function_stack))
