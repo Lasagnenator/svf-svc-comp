@@ -53,6 +53,11 @@ class CFLreachability:
                     entry = self.icfg.getFunEntryICFGNode(callee)
                     new_function_stack = function_stack + (callee_name,)
                     self.worklist.append((entry, new_stack, new_function_stack))
+                else:
+                    # skip external call, continue after it
+                    ret_node = node.getRetICFGNode()
+                    for e in ret_node.getOutEdges():
+                        self.worklist.append((e.getDstNode(), stack, function_stack))
                 continue
             # -------------------------------------------------
             # handle Ret node
