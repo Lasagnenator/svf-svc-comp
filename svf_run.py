@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import generate_witness
 import invariants
+import violations
 
 import nondet
 from util import *
@@ -223,9 +224,22 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         generate_witness.write_witness(
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
+    elif correctness == "Incorrect" and prop_file_name == 'unreach-call.prp':
+        with open(prop_file_path) as f:
+            spec = f.read().strip()
+        segments = violations.reach_error_segments(
+            ae.results.get("reach", []), cfl_ids, input_file_path, input_line_count)
+        try:
+            if segments is None:
+                raise ValueError("no feasible reach_error site has a usable source location")
+            generate_witness.write_violation_witness(
+                segments, [input_file_path], spec, witness_file_path, witness_format,
+                'ILP32' if bits == "32" else 'LP64')
+            log(f"Exported a violation witness with {len(segments)} segment(s).")
+        except ValueError as e:
+            log(f"No violation witness: {e}")
     else:
-        # generate_witness.write_violation_witness can write a violation witness, but the
-        # analysis does not yet produce the waypoints of a path to the violation.
+        # Memory-safety violations do not produce a witness yet.
         log(f"No witness for result: {correctness}")
 
     working_file.close()

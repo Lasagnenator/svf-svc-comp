@@ -17,6 +17,7 @@ from unittest import mock
 
 import generate_witness
 import invariants
+import violations
 import yaml
 
 from tests import tester
@@ -223,6 +224,59 @@ class WitnessExportTests(unittest.TestCase):
                 {'waypoint': {'type': 'target', 'action': 'follow',
                               'location': {'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}}}]},
         ])
+
+    def test_reach_error_target_prefers_cfl_reachable_then_earliest_site(self):
+        def site(node_id, location, function='main'):
+            node = mock.Mock()
+            node.getId.return_value = node_id
+            node.getSourceLoc.return_value = location
+            node.getFun.return_value.getName.return_value = function
+            return node
+
+        early = site(1, '{"ln": 8, "cl": 5, "fl": "tmp.c"}')
+        late = site(2, '{"ln": 20, "cl": 7, "fl": "tmp.c"}', 'check')
+        results = [(True, late), (True, early), (False, site(3, '{"ln": 2, "cl": 3}')),
+                   (True, site(4, '{"ln": 1}')), (True, None), (True, site(5, '{"ln": 99, "cl": 1}'))]
+        self.assertEqual(violations.reach_error_segments(results, set(), 'program.c', max_line=50),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 8, 'column': 5,
+                            'function': 'main'}]])
+        self.assertEqual(violations.reach_error_segments(results, {2}, 'program.c', max_line=50),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 20, 'column': 7,
+                            'function': 'check'}]])
+        # Infeasible sites, sites without a column and appended code never become the target.
+        self.assertIsNone(violations.reach_error_segments(results[2:], set(), 'program.c', max_line=50))
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_claimed_violation_writes_a_target_witness(self):
+        program = (
+            'extern void abort(void);\n'
+            'extern void __assert_fail(const char *, const char *, unsigned int, const char *);\n'
+            'void reach_error() { __assert_fail("0", "program.c", 3, "reach_error"); }\n'
+            'extern int __VERIFIER_nondet_int(void);\n'
+            'int main() {\n'
+            '  int x = __VERIFIER_nondet_int();\n'
+            '  if (x == 5) {\n'
+            '    reach_error();\n'
+            '  }\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'), '--claim-violations',
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Incorrect', output, output[-2000:])
+            entry, = yaml.safe_load(witness.read_text())
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['content'], [{'segment': [{'waypoint': {
+            'type': 'target', 'action': 'follow',
+            'location': {'file_name': str(source), 'line': 8, 'column': 5, 'function': 'main'}}}]}])
 
     def test_malformed_violation_witness_raises_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
