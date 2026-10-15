@@ -11,3 +11,4 @@ sv-benchmarks/
 sv-benchmarks-*/
 authorized_keys
 witness.yml
+debug_output/

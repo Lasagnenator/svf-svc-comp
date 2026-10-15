@@ -42,7 +42,7 @@ PROPERTY_NAMES = {
 SUPPORTED_PROPERTIES = {
     "reach",
     # Re-enable once svf_run.py implements memory property dispatch.
-    # "safety",
+    "safety",
     # "cleanup",
 }
 RESULT_RE = re.compile(
