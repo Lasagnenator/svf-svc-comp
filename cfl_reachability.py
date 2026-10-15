@@ -3,15 +3,15 @@ class CFLreachability:
     def __init__(self, pag: pysvf.SVFIR):
         self.svfir = pag
         self.icfg = pag.getICFG()
+        # worklist structure: (current ICFG node, current call context)
         self.worklist = []
         self.visited = set()
-        self.call_stack = []
         self.results = {"reach": []}
     def analyze(self):
         # main function
         main_fun = self.svfir.getFunObjVar("main")
         entry = self.icfg.getFunEntryICFGNode(main_fun)
-        self.worklist.append((entry, ()))
+        self.worklist.append((entry, (), ("main",)))
         # remain codes
         self.run()
         return self.results
@@ -20,14 +20,8 @@ class CFLreachability:
         # repeat until worklist is empty (all functions processed)
         while self.worklist:
             # get the first function from worklist
-            node, stack = self.worklist.pop(0)
-            if len(stack) >= 2:
-                ctx = (stack[-2], stack[-1])
-            elif len(stack) == 1:
-                ctx = (None, stack[-1])
-            else:
-                ctx = (None, None)
-            state_key = (node.getId(), ctx)
+            node, stack, function_stack = self.worklist.pop(0)
+            state_key = (node.getId(), stack, function_stack)
             # skip if already visited
             if state_key in self.visited:
                 continue
@@ -38,55 +32,57 @@ class CFLreachability:
                 callee = node.getCalledFunction()
                 if callee and callee.getName() == "reach_error":
                     self.results["reach"].append((True, node))
+                    continue
                 # -------------------------------------------------
                 # handle Call node
-                callee = node.getCalledFunction()
                 # handle internal calls
                 # we don't need to handle external calls
                 if callee and not pysvf.isExtCall(callee):
-                    # push stack
                     callee_name = callee.getName()
-                    new_stack = (stack + (callee_name,))[-2:]
+                    if callee_name in function_stack:
+                        ret_node = node.getRetICFGNode()
+                        for e in ret_node.getOutEdges():
+                            self.worklist.append((e.getDstNode(), stack, function_stack))
+                        continue
+
+                    # push stack
+                    callsite_id = node.getId()
+                    new_stack = stack + (callsite_id,)
 
                     # jump to callee entry
                     entry = self.icfg.getFunEntryICFGNode(callee)
-                    self.worklist.append((entry, new_stack))
-
-                # also follow normal CFG to ret node
-                ret_node = node.getRetICFGNode()
-                self.worklist.append((ret_node, stack))  # will pop when handle ret
+                    new_function_stack = function_stack + (callee_name,)
+                    self.worklist.append((entry, new_stack, new_function_stack))
+                else:
+                    # skip external call, continue after it
+                    ret_node = node.getRetICFGNode()
+                    for e in ret_node.getOutEdges():
+                        self.worklist.append((e.getDstNode(), stack, function_stack))
                 continue
             # -------------------------------------------------
             # handle Ret node
             elif isinstance(node, pysvf.RetICFGNode):
+                # don't handle external returns
                 callnode = node.getCallICFGNode()
-                callee = callnode.getCalledFunction() if callnode else None
-                if callee is None or pysvf.isExtCall(callee):
-                    # External and unknown-target calls pushed no frame, so there is
-                    # nothing to pop. Execution still continues past them, so keep
-                    # following the path.
-                    for e in node.getOutEdges():
-                        self.worklist.append((e.getDstNode(), stack))
+                if callnode and pysvf.isExtCall(callnode.getCalledFunction()):
                     continue
                 # pop stack
                 if stack:
                     top = stack[-1]   
                 else:
                     continue # empty stack, skip
-
-                callee_name = callee.getName()
-                if top != callee_name:
+                if not callnode or top != callnode.getId():
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
-
+                new_function_stack = function_stack[:-1]
                 # handle the nodes after return the current function
                 for e in node.getOutEdges():
                     dst = e.getDstNode()
-                    self.worklist.append((dst, new_stack))
+                    self.worklist.append((dst, new_stack, new_function_stack))
 
             # -------------------------------------------------
             # handle normal node
             else:
                 for e in node.getOutEdges():
                     dst = e.getDstNode()
-                    self.worklist.append((dst, stack))
+                    self.worklist.append((dst, stack, function_stack))
