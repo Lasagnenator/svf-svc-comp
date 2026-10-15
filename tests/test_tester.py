@@ -36,7 +36,7 @@ class WitnessExportTests(unittest.TestCase):
                 ' \twhile (1) { x += 1; }\n  do { y--; } while (1);\n}\n')
             loops = invariants._source_loops(source)
             self.assertEqual([(loop['line'], loop['column']) for loop in loops], [(4, 3), (5, 3)])
-            self.assertEqual([loop['allowed_names'] for loop in loops], [{'y'}, {'x'}])
+            self.assertEqual([loop['allowed_names'] for loop in loops], [{'x', 'y'}, {'x', 'y'}])
 
     @mock.patch.object(invariants.subprocess, 'run')
     def test_failed_ast_dump_is_skipped(self, run):
@@ -57,16 +57,27 @@ class WitnessExportTests(unittest.TestCase):
                 "  for (i = 0; 1; i++) {\n    x;\n  }\n}\n")
             loop, = invariants._source_loops(source)
             self.assertEqual((loop['line'], loop['column']), (5, 3))
-            self.assertEqual(loop['allowed_names'], {'x'})
+            self.assertEqual(loop['allowed_names'], {'i', 'x'})
             head = mock.Mock()
             head.getSourceLoc.return_value = '{"ln": 6, "cl": 5, "fl": "temporary.c"}'
             head.getFun.return_value.getName.return_value = 'main'
+            head.getInEdges.return_value = []
             state = object()
             analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={head: state})
             with mock.patch.object(invariants, 'invariant_at', return_value='(x == 0)') as render:
                 entry, = invariants.extract_loop_invariants(analysis, None, str(source))
             self.assertEqual((entry['line'], entry['column']), (5, 3))
-            render.assert_called_once_with(head, state, None, None, {'x'}, 5)
+            render.assert_called_once_with(head, state, None, None, {'i', 'x'}, 5, [])
+
+    def test_only_variables_defined_on_every_incoming_edge_are_exported(self):
+        def state(*objects):
+            return SimpleNamespace(getLocToVal=lambda: dict.fromkeys(objects))
+
+        # Object 1 is uninitialised on loop entry, so only the back edge holds a value for it.
+        self.assertEqual(invariants._defined_on_every_edge([state(2), state(1, 2)]), {2})
+        # An edge that was never reached has no state and constrains nothing.
+        self.assertEqual(invariants._defined_on_every_edge([None, state(1, 2)]), {1, 2})
+        self.assertEqual(invariants._defined_on_every_edge([None]), set())
 
     def test_missing_locations_and_unparsed_source_are_skipped(self):
         head = mock.Mock()
