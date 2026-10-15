@@ -168,6 +168,7 @@ class Result:
     error_message: str | None
     log_path: str
     rerun_command: str
+    peak_memory_mib: float | None = None
 
 
 def parse_sample(value):
@@ -432,6 +433,40 @@ def sample_tasks(tasks, percent, seed, count=None):
     return sorted(selected, key=lambda task: stable_rank(task, seed))
 
 
+class MeasuredPopen(subprocess.Popen):
+    """Collect per-child peak RSS through the POSIX Popen wait hooks."""
+
+    def __init__(self, *args, **kwargs):
+        self.peak_memory_mib = None
+        super().__init__(*args, **kwargs)
+
+    def _wait_with_usage(self, pid, wait_flags):
+        waited_pid, status, usage = os.wait4(pid, wait_flags)
+        if waited_pid == self.pid:
+            divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+            self.peak_memory_mib = usage.ru_maxrss / divisor
+        return waited_pid, status
+
+    def _try_wait(self, wait_flags):
+        try:
+            return self._wait_with_usage(self.pid, wait_flags)
+        except ChildProcessError:
+            return self.pid, 0
+
+    def poll(self):
+        # Popen.poll reaps through _internal_poll, whose private arguments changed in
+        # Python 3.14, so reap here instead and record the exit status the same way.
+        if self.returncode is None:
+            try:
+                pid, status = self._wait_with_usage(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                self.returncode = 0  # already reaped elsewhere, as Popen itself assumes
+            else:
+                if pid == self.pid:
+                    self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+
 def limit_resources(cpu_seconds, memory_bytes):
     os.setsid()
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
@@ -497,12 +532,14 @@ def witness_required(task, answer):
 
 
 def validate_witness(task, answer, args, witness_path, input_paths, property_path):
-    if not witness_required(task, answer):
-        return "not-required"
+    if answer not in {"true", "false"}:
+        return "not-run"
     validation_results = getattr(args, "validation_results", {})
     if task.run_id in validation_results:
         return validation_results[task.run_id]
     template = getattr(args, "validator_command", None)
+    if not witness_required(task, answer) and not (template and witness_path.is_file()):
+        return "not-required"
     if not template or not witness_path.is_file():
         return "unconfirmed"
     values = {
@@ -511,15 +548,43 @@ def validate_witness(task, answer, args, witness_path, input_paths, property_pat
         "property": property_path,
         "bits": "32" if task.data_model == "ILP32" else "64",
     }
+    log_path = witness_path.with_suffix(".validation.log")
+    process = None
+    timed_out = False
+    wall_limit = getattr(args, "validation_wall_limit", None) or (90 if answer == "false" else 300)
     try:
-        command = shlex.split(template.format(**values))
-        process = subprocess.run(
+        command = [part.format(**values) for part in shlex.split(template)]
+        process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace", timeout=getattr(args, "validation_wall_limit", 300),
+            text=True, errors="replace", cwd=getattr(args, "svf_root", None),
+            start_new_session=True,
         )
-    except (KeyError, OSError, subprocess.TimeoutExpired, ValueError):
+        try:
+            stdout, stderr = process.communicate(timeout=wall_limit)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            stderr += f"\nValidator wall timeout after {wall_limit}s\n"
+        log_path.write_text(
+            f"command: {shlex.join(command)}\nreturn_code: {process.returncode}\n"
+            f"wall_limit: {wall_limit}\n\n===== STDOUT =====\n{stdout}"
+            f"\n===== STDERR =====\n{stderr}", errors="replace")
+    except KeyboardInterrupt:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        raise
+    except (KeyError, OSError, ValueError) as error:
+        log_path.write_text(f"Validator failed: {error}\n", errors="replace")
         return "unconfirmed"
-    return "correct" if process.returncode == 0 else "unconfirmed"
+    return "correct" if not timed_out and process.returncode == 0 else "unconfirmed"
 
 
 def diagnostic_tail(text, lines=12):
@@ -591,7 +656,7 @@ def run_task(task, args, logs_dir):
     return_code = None
     process = None
     try:
-        process = subprocess.Popen(
+        process = MeasuredPopen(
             command, cwd=yaml_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, errors="replace",
             preexec_fn=lambda: limit_resources(args.cpu_limit, args.memory_limit_mib * 1024 * 1024),
@@ -617,6 +682,7 @@ def run_task(task, args, logs_dir):
     except Exception as error:
         stdout, stderr = "", f"runner failed to start tool: {error!r}"
     wall_seconds = time.monotonic() - started
+    peak_memory_mib = process.peak_memory_mib if process is not None else None
     answer, classification, error_code, error_message, termination_reason, signal_name, reported = classify(
         stdout, stderr, return_code, timed_out)
     validation = validate_witness(
@@ -624,7 +690,8 @@ def run_task(task, args, logs_dir):
     score = SCORE.get((task.expected, answer), 0)
     log_path.write_text(
         f"command: {rerun}\ncwd: {yaml_dir}\nreturn_code: {return_code}\n"
-        f"wall_seconds: {wall_seconds:.6f}\n\n===== STDOUT =====\n{stdout}"
+        f"wall_seconds: {wall_seconds:.6f}\npeak_memory_mib: {peak_memory_mib}\n"
+        f"\n===== STDOUT =====\n{stdout}"
         f"\n===== STDERR =====\n{stderr}", errors="replace")
     return Result(
         run_id=task.run_id, task_file=task.yaml_relative, category=task.category,
@@ -637,7 +704,7 @@ def run_task(task, args, logs_dir):
         witness_path=str(witness_path) if witness_path.is_file() else None,
         return_code=return_code,
         termination_reason=termination_reason, signal=signal_name,
-        wall_seconds=wall_seconds, error_code=error_code,
+        wall_seconds=wall_seconds, peak_memory_mib=peak_memory_mib, error_code=error_code,
         error_message=error_message, log_path=str(log_path), rerun_command=rerun,
     )
 
@@ -662,6 +729,8 @@ def summarize(results, population, selected, elapsed, interrupted=False):
     average_size = sum(entry["tasks"] for entry in populated) / len(populated) if populated else 0
     normalized_score = average_size * sum(
         entry["score"] / entry["tasks"] for entry in populated) if populated else None
+    witnesses = [result for result in results if getattr(result, "witness_path", None)]
+    confirmed = sum(result.witness_validation == "correct" for result in witnesses)
     return {
         "schema_version": 1,
         "provisional": True,
@@ -675,6 +744,11 @@ def summarize(results, population, selected, elapsed, interrupted=False):
         "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
+        "witness_validation": {
+            "generated": len(witnesses),
+            "confirmed": confirmed,
+            "confirmation_fraction": confirmed / len(witnesses) if witnesses else None,
+        },
         "wall_seconds": elapsed,
         "interrupted": interrupted,
     }
@@ -735,8 +809,8 @@ def build_parser():
                         help="JSON object mapping run IDs to correct or unconfirmed witness status")
     parser.add_argument("--validator-command",
                         help="validator command template; supports {witness}, {input}, {property}, {bits}")
-    parser.add_argument("--validation-wall-limit", type=int, default=300,
-                        help="validator wall-time limit in seconds (default: 300)")
+    parser.add_argument("--validation-wall-limit", type=int,
+                        help="override validator wall seconds (default: 300 correctness, 90 violation)")
     parser.add_argument("--verbose", "-v", action="count", default=0)
     return parser
 
@@ -765,7 +839,7 @@ def main(argv=None):
         build_parser().error(f"svf_run.py not found under: {args.svf_root}")
     if min(args.cpu_limit, args.wall_limit, args.memory_limit_mib) <= 0:
         build_parser().error("resource limits must be positive")
-    if args.validation_wall_limit <= 0:
+    if args.validation_wall_limit is not None and args.validation_wall_limit <= 0:
         build_parser().error("validation wall limit must be positive")
     try:
         args.validation_results = load_validation_results(args.validation_results)
@@ -823,6 +897,7 @@ def main(argv=None):
             "memory_mib": args.memory_limit_mib,
         },
         "resource_backend": "POSIX process group with per-process rlimits and a runner wall timeout",
+        "memory_measurement": "wait4 peak RSS (including waited-for descendants); not aggregate process-tree memory or virtual address space; excludes witness validation",
         "validator_command": args.validator_command,
         "validation_results_supplied": len(args.validation_results),
         "population": len(tasks),
@@ -862,9 +937,14 @@ def main(argv=None):
                 stream.write(json.dumps(asdict(result)) + "\n")
                 stream.flush()
                 status = "OK" if result.answer == str(result.expected).lower() else result.classification.upper()
-                print(f"[{index}/{len(selected)}] {status:<10} {result.score:+3d} "
-                      f"score={sum(item.score for item in results):+d} "
-                      f"{result.wall_seconds:.2f}s {task.yaml_relative}::{task.property_name}")
+                memory = "peak RSS unavailable"
+                if result.peak_memory_mib is not None:
+                    memory = f"{result.peak_memory_mib:.1f} MiB peak RSS"
+                print(
+                    f"[{index}/{len(selected)}] {status:<10} {result.score:+3d} "
+                    f"score={sum(item.score for item in results):+d} "
+                    f"{result.wall_seconds:.2f}s {memory} {task.yaml_relative}::{task.property_name}"
+                )
                 if result.classification in {"tool_error", "timeout", "unsupported"}:
                     print(f"  log: {result.log_path}", file=sys.stderr)
                     print(f"  rerun: {result.rerun_command}", file=sys.stderr)
@@ -884,6 +964,8 @@ def main(argv=None):
     if summary["normalized_score"] is not None:
         print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))
+    validation = summary["witness_validation"]
+    print(f"Witnesses confirmed: {validation['confirmed']}/{validation['generated']}")
     # Distinguish harness failure from analyser weakness so CI can gate on the exit code.
     start_failures = sum(result.termination_reason == "start_failure" for result in results)
     if start_failures:

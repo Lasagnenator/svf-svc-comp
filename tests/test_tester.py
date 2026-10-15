@@ -3,14 +3,21 @@ Run unit tests with:
 python -m unittest tests.test_tester -v
 """
 
+import csv
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+import generate_witness
+import invariants
+import yaml
 
 from tests import tester
 
@@ -19,7 +26,212 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTER_PATH = ROOT / "tests" / "tester.py"
 
 
+class WitnessExportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('clang-21'), 'clang-21 is not installed')
+    def test_ast_uses_physical_positions_and_operator_kinds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text(
+                '#line 400 "logical.c"\nint main(void) {\n'
+                '  int x = 0, y = 0; volatile int value = 0;\n'
+                ' \twhile (1) { x += 1; }\n  do { y--; } while (1);\n}\n')
+            loops = invariants._source_loops(source)
+            self.assertEqual([(loop['line'], loop['column']) for loop in loops], [(4, 3), (5, 3)])
+            self.assertEqual([loop['allowed_names'] for loop in loops], [{'x', 'y'}, {'x', 'y'}])
+
+    @mock.patch.object(invariants.subprocess, 'run')
+    def test_failed_ast_dump_is_skipped(self, run):
+        for failure in (FileNotFoundError('clang-21'),
+                        SimpleNamespace(returncode=1, stdout=''),
+                        SimpleNamespace(returncode=0, stdout='not JSON')):
+            run.side_effect = failure if isinstance(failure, Exception) else None
+            run.return_value = failure
+            self.assertEqual(invariants._source_loops('program.c'), [])
+
+    @unittest.skipUnless(shutil.which('clang-21'), 'clang-21 is not installed')
+    def test_loop_coordinates_and_stable_variables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "program.c"
+            source.write_text(
+                "void escape(int *);\nint main(void) {\n"
+                "  int i = 0, x = 0, y = 0;\n  escape(&y);\n"
+                "  for (i = 0; 1; i++) {\n    x;\n  }\n}\n")
+            loop, = invariants._source_loops(source)
+            self.assertEqual((loop['line'], loop['column']), (5, 3))
+            self.assertEqual(loop['allowed_names'], {'i', 'x'})
+            head = mock.Mock()
+            head.getSourceLoc.return_value = '{"ln": 6, "cl": 5, "fl": "temporary.c"}'
+            head.getFun.return_value.getName.return_value = 'main'
+            head.getInEdges.return_value = []
+            state = object()
+            analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={head: state})
+            with mock.patch.object(invariants, 'invariant_at', return_value='(x == 0)') as render:
+                entry, = invariants.extract_loop_invariants(analysis, None, str(source))
+            self.assertEqual((entry['line'], entry['column']), (5, 3))
+            render.assert_called_once_with(head, state, None, None, {'i', 'x'}, 5, [])
+
+    def test_only_variables_defined_on_every_incoming_edge_are_exported(self):
+        def state(*objects):
+            return SimpleNamespace(getLocToVal=lambda: dict.fromkeys(objects))
+
+        # Object 1 is uninitialised on loop entry, so only the back edge holds a value for it.
+        self.assertEqual(invariants._defined_on_every_edge([state(2), state(1, 2)]), {2})
+        # An edge that was never reached has no state and constrains nothing.
+        self.assertEqual(invariants._defined_on_every_edge([None, state(1, 2)]), {1, 2})
+        self.assertEqual(invariants._defined_on_every_edge([None]), set())
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_real_analysis_exports_a_valid_loop_invariant(self):
+        # The other export tests stub out the analysis. This one runs it for real, so a
+        # change to AbstractExecution that empties or corrupts the loop-head state fails
+        # here rather than silently producing empty or invalid witnesses.
+        program = (
+            'extern void abort(void);\n'
+            'extern void __assert_fail(const char *, const char *, unsigned int, const char *);\n'
+            'void reach_error() { __assert_fail("0", "program.c", 3, "reach_error"); }\n'
+            'void __VERIFIER_assert(int cond) {\n'
+            '  if (!(cond)) {\n'
+            '    ERROR: {reach_error();abort();}\n'
+            '  }\n'
+            '}\n'
+            'int main() {\n'
+            '  int i = 0;\n'
+            '  int limit = 10;\n'
+            '  int last;\n'
+            '  while (i < limit) {\n'
+            '    last = i;\n'
+            '    i = i + 1;\n'
+            '  }\n'
+            '  __VERIFIER_assert(limit == 10);\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Correct', output, output[-2000:])
+            invariant, = (entry['invariant'] for entry in yaml.safe_load(witness.read_text())[0]['content'])
+        self.assertEqual((invariant['location']['line'], invariant['location']['column']), (13, 3))
+        self.assertIn('(limit == 10)', invariant['value'])
+        # The loop counter is modified in the loop but defined on entry, so it is kept.
+        self.assertIn('(i >= 0)', invariant['value'])
+        # last is uninitialised on entry; only the back edge has a value for it.
+        self.assertNotIn('last', invariant['value'])
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_real_analysis_ignores_a_callers_variable_of_the_same_name(self):
+        # main's tmp is still in the state inside count(), where tmp names count's own
+        # uninitialised local, so exporting main's value there would be invalid.
+        program = (
+            'void count(void);\n'
+            'int main() {\n'
+            '  int tmp = 1;\n'
+            '  count();\n'
+            '  return tmp;\n'
+            '}\n'
+            'void count(void) {\n'
+            '  int tmp;\n'
+            '  int i = 0;\n'
+            '  while (i < 3) {\n'
+            '    tmp = i;\n'
+            '    i = i + 1;\n'
+            '  }\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Correct', output, output[-2000:])
+            invariant, = (entry['invariant'] for entry in yaml.safe_load(witness.read_text())[0]['content'])
+        self.assertEqual((invariant['location']['line'], invariant['location']['function']), (10, 'count'))
+        self.assertIn('(i >= 0)', invariant['value'])
+        self.assertNotIn('tmp', invariant['value'])
+
+    def test_missing_locations_and_unparsed_source_are_skipped(self):
+        head = mock.Mock()
+        analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={})
+        with mock.patch.object(invariants, '_source_loops', return_value=[]):
+            for location in ('', '{"ln": 0}', '{"ln": 1}', '{"ln": 1, "cl": 0}'):
+                head.getSourceLoc.return_value = location
+                self.assertEqual(invariants.extract_loop_invariants(analysis, None, 'missing.c'), [])
+        self.assertEqual(invariants._source_loops('/nonexistent/witness-source.c'), [])
+
+    def test_incomplete_invariant_records_are_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { while (1) {} }\n')
+            witness = Path(directory) / 'witness.yml'
+            record = {'type': 'loop_invariant', 'file_name': str(source), 'line': 1,
+                      'column': 18, 'function': 'main', 'value': '1'}
+            incomplete = [None] + [record | {key: None} for key in ('line', 'column', 'function', 'value')]
+            generate_witness.write_witness(
+                incomplete + [record], [str(source)], 'G ! call(reach_error())', str(witness))
+            entry, = yaml.safe_load(witness.read_text())
+            self.assertEqual(entry['metadata']['format_version'], '2.0')
+            self.assertEqual(len(entry['content']), 1)
+            location = entry['content'][0]['invariant']['location']
+            self.assertEqual(location, {'file_name': str(source), 'line': 1, 'column': 18, 'function': 'main'})
+
+    def test_wrapper_reports_missing_columns_without_starting_cpachecker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            witness = Path(directory) / 'witness.yml'
+            witness.write_text(yaml.safe_dump([{'entry_type': 'invariant_set', 'content': [
+                {'invariant': {'location': {'file_name': 'program.c', 'line': 1}}}]}]))
+            with mock.patch.dict('os.environ', {'CPACHECKER_HOME': directory}):
+                home = Path(directory)
+                (home / 'bin').mkdir()
+                (home / 'bin' / 'cpachecker').symlink_to('/bin/false')
+                result = subprocess.run(
+                    [str(ROOT / 'tests' / 'validate_witness.sh'), str(witness), 'program.c', 'prop.prp', '64'],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('explicit positive invariant line and column', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            witness.write_text(yaml.safe_dump([{'entry_type': 'invariant_set', 'content': [
+                {'invariant': {'location': {'file_name': 'program.c', 'line': 1, 'column': 1}}}]}]))
+            with mock.patch.dict('os.environ', {'CPACHECKER_HOME': directory}):
+                result = subprocess.run(
+                    [str(ROOT / 'tests' / 'validate_witness.sh'), str(witness), 'program.c', 'prop.prp', '64'],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('explicit invariant function name', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+
+
 class TesterUnitTests(unittest.TestCase):
+    def test_peak_memory_is_per_run_and_captured_by_poll(self):
+        peaks = []
+        for allocation in (96 * 1024 * 1024, 0):
+            with tester.MeasuredPopen(
+                    [sys.executable, "-c", f"data = bytearray({allocation})"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                process.communicate(timeout=10)
+                self.assertEqual(process.poll(), 0)
+                self.assertIsNotNone(process.peak_memory_mib)
+                peaks.append(process.peak_memory_mib)
+        self.assertGreater(peaks[0], peaks[1] + 32)
+
+        with tester.MeasuredPopen([sys.executable, "-c", "pass"]) as process:
+            with mock.patch.object(tester.os, "wait4", wraps=tester.os.wait4) as wait:
+                process.poll()
+                wait.assert_called_once_with(process.pid, tester.os.WNOHANG)
+            process.wait(timeout=10)
+            self.assertGreater(process.peak_memory_mib, 0)
+
     def make_task(self, identity, property_name="reach", data_model="LP64", expected=True):
         return tester.Task(
             identity, Path(f"/corpus/c/group/{identity}.yml"),
@@ -120,6 +332,7 @@ class TesterUnitTests(unittest.TestCase):
                                    memory_limit_mib=64)
             result = tester.run_task(task, args, root)
             self.assertEqual(result.classification, "unsupported")
+            self.assertIsNone(result.peak_memory_mib)
             self.assertEqual(result.error_code, "MULTIPLE_INPUTS")
             self.assertIsNotNone(result.error_message)
             assert result.error_message is not None
@@ -167,10 +380,11 @@ class TesterUnitTests(unittest.TestCase):
         self.assertEqual(tagged[0], "false")
         self.assertEqual(tagged[6], "valid-deref")
 
-    @mock.patch("tests.tester.subprocess.run")
+    @mock.patch("tests.tester.subprocess.Popen")
     def test_false_answer_runs_configured_validator(self, run):
         task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
-        run.return_value = SimpleNamespace(returncode=0, stdout="witness confirmed", stderr="")
+        run.return_value.returncode = 0
+        run.return_value.communicate.return_value = ("witness confirmed", "")
         args = SimpleNamespace(validation_results={},
                                validator_command="validate {witness} {input}",
                                validation_wall_limit=5)
@@ -182,7 +396,7 @@ class TesterUnitTests(unittest.TestCase):
         self.assertEqual(validation, "correct")
         run.assert_called_once()
 
-    @mock.patch("tests.tester.subprocess.run")
+    @mock.patch("tests.tester.subprocess.Popen")
     def test_true_answer_without_witness_requirement_skips_validator(self, run):
         task = self.categorised(self.make_task("arrays"), "C.unreach-call.Arrays")
         args = SimpleNamespace(validation_results={},
@@ -204,6 +418,53 @@ class TesterUnitTests(unittest.TestCase):
         ]
         summary = tester.summarize(results, 2, [first, second], 0)
         self.assertEqual(summary["normalized_score"], 3)
+
+    @mock.patch("tests.tester.subprocess.Popen")
+    def test_validator_checks_optional_witnesses_and_preserves_spaces(self, run):
+        run.return_value.returncode = 0
+        run.return_value.communicate.return_value = ("confirmed", "")
+        args = SimpleNamespace(validator_command="validate {witness} {input} {property} {bits}")
+        for category in (None, "C.unreach-call.Arrays"):
+            task = self.categorised(self.make_task("safe"), category)
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
+                witness = Path(directory) / "witness with spaces.yml"
+                witness.write_text("[]")
+                self.assertEqual(tester.validate_witness(
+                    task, "true", args, witness, ["input with spaces.c"], "property.prp"), "correct")
+                self.assertEqual(run.call_args.args[0], [
+                    "validate", str(witness), "input with spaces.c", "property.prp", "64"])
+                run.return_value.communicate.assert_called_with(timeout=300)
+                self.assertIn("confirmed", witness.with_suffix(".validation.log").read_text())
+
+    @mock.patch("tests.tester.os.killpg")
+    @mock.patch("tests.tester.subprocess.Popen")
+    def test_validator_timeout_kills_process_group(self, run, killpg):
+        run.return_value.pid = 123
+        run.return_value.returncode = 0
+        run.return_value.communicate.side_effect = [
+            subprocess.TimeoutExpired("validate", 90), ("", "")]
+        args = SimpleNamespace(validator_command="validate {witness}")
+        with tempfile.TemporaryDirectory() as directory:
+            witness = Path(directory) / "witness.yml"
+            witness.write_text("[]")
+            validation = tester.validate_witness(
+                self.make_task("unsafe"), "false", args, witness, ["input.c"], "property.prp")
+            self.assertEqual(validation, "unconfirmed")
+            self.assertIn("timeout after 90s", witness.with_suffix(".validation.log").read_text())
+        killpg.assert_called_once_with(123, tester.signal.SIGKILL)
+        self.assertEqual(run.return_value.communicate.call_args_list[0], mock.call(timeout=90))
+
+    def test_summary_reports_fraction_of_generated_witnesses(self):
+        task = self.make_task("safe")
+        results = [SimpleNamespace(
+            category=None, score=2, answer="true", expected=True, classification="result",
+            witness_path=path, witness_validation=status)
+            for path, status in (("one.yml", "correct"), ("two.yml", "unconfirmed"),
+                                 (None, "not-required"))]
+        summary = tester.summarize(results, 3, [task] * 3, 0)
+        self.assertEqual(summary["witness_validation"], {
+            "generated": 2, "confirmed": 1, "confirmation_fraction": 0.5,
+        })
 
 
 class TesterIntegrationTests(unittest.TestCase):
@@ -268,9 +529,10 @@ print(answers[name])
         self.temp.cleanup()
 
     def test_end_to_end_score_and_error_artifacts(self):
+        csv_path = self.base / "results.csv"
         process = subprocess.run(
             [sys.executable, str(TESTER_PATH), str(self.corpus), str(self.tool),
-             "--reach", "--results-dir", str(self.results)],
+             "--reach", "--results-dir", str(self.results), "--output", str(csv_path)],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
@@ -280,6 +542,14 @@ print(answers[name])
         self.assertEqual(summary["maximum_selected_score"], 8)
         self.assertEqual(summary["counts"], {"correct": 2, "wrong": 2, "tool_error": 1})
         self.assertEqual(len(records), 5)
+        for record in records:
+            self.assertGreater(record["peak_memory_mib"], 0)
+            self.assertIn("peak_memory_mib:", Path(record["log_path"]).read_text())
+        self.assertIn("MiB peak RSS", process.stdout)
+        with csv_path.open() as stream:
+            csv_records = list(csv.DictReader(stream))
+        self.assertEqual([float(record["peak_memory_mib"]) for record in csv_records],
+                         [record["peak_memory_mib"] for record in records])
         error = next(record for record in records if record["classification"] == "tool_error")
         self.assertEqual(error["error_code"], "ERROR(AE)")
         self.assertIn("getElementIndex", error["error_message"])
@@ -426,6 +696,7 @@ print(answers[name])
         self.assertEqual(record["classification"], "timeout")
         self.assertEqual(record["termination_reason"], "wall_timeout")
         self.assertEqual(record["score"], 0)
+        self.assertGreater(record["peak_memory_mib"], 0)
 
 
 if __name__ == "__main__":
