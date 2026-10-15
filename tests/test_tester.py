@@ -4,6 +4,7 @@ python -m unittest tests.test_tester -v
 """
 
 import csv
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -78,6 +79,51 @@ class WitnessExportTests(unittest.TestCase):
         # An edge that was never reached has no state and constrains nothing.
         self.assertEqual(invariants._defined_on_every_edge([None, state(1, 2)]), {1, 2})
         self.assertEqual(invariants._defined_on_every_edge([None]), set())
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_real_analysis_exports_a_valid_loop_invariant(self):
+        # The other export tests stub out the analysis. This one runs it for real, so a
+        # change to AbstractExecution that empties or corrupts the loop-head state fails
+        # here rather than silently producing empty or invalid witnesses.
+        program = (
+            'extern void abort(void);\n'
+            'extern void __assert_fail(const char *, const char *, unsigned int, const char *);\n'
+            'void reach_error() { __assert_fail("0", "program.c", 3, "reach_error"); }\n'
+            'void __VERIFIER_assert(int cond) {\n'
+            '  if (!(cond)) {\n'
+            '    ERROR: {reach_error();abort();}\n'
+            '  }\n'
+            '}\n'
+            'int main() {\n'
+            '  int i = 0;\n'
+            '  int limit = 10;\n'
+            '  int last;\n'
+            '  while (i < limit) {\n'
+            '    last = i;\n'
+            '    i = i + 1;\n'
+            '  }\n'
+            '  __VERIFIER_assert(limit == 10);\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Correct', output, output[-2000:])
+            invariant, = (entry['invariant'] for entry in yaml.safe_load(witness.read_text())[0]['content'])
+        self.assertEqual((invariant['location']['line'], invariant['location']['column']), (13, 3))
+        self.assertIn('(limit == 10)', invariant['value'])
+        # The loop counter is modified in the loop but defined on entry, so it is kept.
+        self.assertIn('(i >= 0)', invariant['value'])
+        # last is uninitialised on entry; only the back edge has a value for it.
+        self.assertNotIn('last', invariant['value'])
 
     def test_missing_locations_and_unparsed_source_are_skipped(self):
         head = mock.Mock()
