@@ -45,7 +45,7 @@ def generate_nondet(c_code):
     for svc_type, c_type in nondet_types.items():
         if f"__VERIFIER_nondet_{svc_type}" in c_code:
             defs.append(f"{c_type} __VERIFIER_nondet_{svc_type}() {{ {c_type} val; return val; }}")
-            util.log(f"Added definition: {c_type} __VERIFIER_nondet_{svc_type}.")
+            util.log(f"Added definition: {c_type} __VERIFIER_nondet_{svc_type}.", category=util.Log.SETUP)
 
     defs.append("")
     return "\n".join(defs)

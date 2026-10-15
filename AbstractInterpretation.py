@@ -234,10 +234,10 @@ class AbstractExecutionHelper:
 
     def printReport(self):
         if len(self.node_to_bug_info) > 0:
-            print("######################Buffer Overflow ({} found)######################".format(len(self.node_to_bug_info)))
-            print("---------------------------------------------")
+            log("######################Buffer Overflow ({} found)######################".format(len(self.node_to_bug_info)), category=Log.MEMORY)
+            log("---------------------------------------------", category=Log.MEMORY)
             for node, msg in self.node_to_bug_info.items():
-                print(f"{node}: {msg}\n---------------------------------------------")
+                log(f"{node}: {msg}\n---------------------------------------------", category=Log.MEMORY)
 
 
     def updateGepObjOffsetFromBase(self, abstractState: pysvf.AbstractState, gepAddrs: pysvf.AddressValue, objAddrs: pysvf.AddressValue, offset: pysvf.IntervalValue):
@@ -525,7 +525,7 @@ class AbstractExecution:
             else:
                 # Handle singleton node
                 if not self.handleICFGNode(node):
-                    print(f"Fixpoint reached or infeasible for node {node.getId()}")
+                    log(f"Fixpoint reached or infeasible for node {node.getId()}", category=Log.TRACE)
                     continue
                 
                 # Get next nodes and add to worklist
@@ -633,7 +633,7 @@ class AbstractExecution:
         if not is_feasible:
             # Marks node as reached and infeasible
             self.infeasible_nodes.add(node)
-            print(f"Infeasible for node {node.getId()}")
+            log(f"Infeasible for node {node.getId()}", category=Log.TRACE)
             return False
 
         # A node can be reached on a later iteration (a loop body whose first visit
@@ -837,7 +837,7 @@ class AbstractExecution:
             self.resumeAfterUnanalysedCall(node)
             return
         fun_name = callee.getName()
-        print(fun_name)
+
         # Narrow the caller before the body is walked; the body is then analysed as usual,
         # because the return node takes its state from the callee's exit.
         if fun_name in self.ASSUME_HELPERS and not self.applyAssumption(node):
@@ -906,15 +906,13 @@ class AbstractExecution:
 
             # Check if the interval for the argument is infinite
             if abstract_state[arg0].getInterval().isTop():
-                print(f"svf_assert Fail. {callNode}")
-                assert False
+                raise AssertionError(f"svf_assert Fail. {callNode}")
             else:
                 if (abstract_state[arg0].getInterval().equals(IntervalValue(1, 1)) or
                         abstract_state[arg0].getInterval().equals(IntervalValue(-1, -1))):
-                    print(f"The assertion ({callNode}) is successfully verified!!")
+                    log(f"The assertion ({callNode}) is successfully verified!!", category=Log.TRACE)
                 else:
-                    print(f"The assertion ({callNode}) is unsatisfiable!!")
-                    assert False
+                    raise AssertionError(f"The assertion ({callNode}) is unsatisfiable!!")
 
         elif callNode.getCalledFunction().getName() == "OVERFLOW":
             # If the condition is false, the program is infeasible
@@ -940,18 +938,16 @@ class AbstractExecution:
                                 + access_offset >= size
                         )
                         if overflow:
-                            print("obj len: {}, you want to access: {}.".format(size, access_offset))
+                            log("obj len: {}, you want to access: {}.".format(size, access_offset), category=Log.MEMORY)
                     else:
                         raise AssertionError("Pointer not found in gepObjOffsetFromBase")
 
                 if overflow:
-                    print("Your implementation successfully detected the buffer overflow")
+                    log("Your implementation successfully detected the buffer overflow", category=Log.MEMORY)
                 else:
-                    print(f"Your implementation failed to detect the buffer overflow! {callNode}")
-                    assert False
+                    raise AssertionError(f"Your implementation failed to detect the buffer overflow! {callNode}")
             else:
-                print(f"Your implementation failed to detect the buffer overflow! {callNode}")
-                assert False
+                raise AssertionError(f"Your implementation failed to detect the buffer overflow! {callNode}")
 
 
     """
@@ -1006,7 +1002,7 @@ class AbstractExecution:
             abstract_state.joinWith(self.skipped_states[block])
             in_edge_num += 1
         if in_edge_num == 0:
-            print(f"Error: No predecessors for block {block.getId()}")
+            log(f"No predecessors for block {block.getId()}", category=Log.TRACE)
             if unanalysed_preds:
                 # Defer: a predecessor with no state may still be one every path into
                 # which was pruned
@@ -1239,7 +1235,7 @@ class AbstractExecution:
 
             self.handleFunction(self.icfg.getFunEntryICFGNode(main_fun))
         else:
-            assert False, "Main function not found"
+            raise AssertionError("Main function not found")
         self.finaliseGaps()
         self.ensureAllAssertsValidated()
         self.buf_overflow_helper.printReport()
@@ -1279,7 +1275,7 @@ class AbstractExecution:
         elif isinstance(stmt, pysvf.UnaryOPStmt) or isinstance(stmt, pysvf.BranchStmt):
             pass
         else:
-            assert False , "Unhandled statement type"
+            raise AssertionError("Unhandled statement type")
 
     """
     Initialize an object variable in the abstract state.

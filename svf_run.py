@@ -18,7 +18,8 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
-    parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
+    parser.add_argument("--verbose", "-v", action="append", choices=[c.value for c in Log], default=[],
+                        help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
     parser.add_argument("--claim-violations", action="store_true",
                         help="report a violation whenever the abstract state says reach_error "
@@ -29,8 +30,10 @@ def main():
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
-    log(f"Arguments: {args}")
-    log(f"Extra unknown arguments: {extra}")
+
+    set_verbose(args.verbose)
+    log(f"Arguments: {args}", category=Log.SETUP)
+    log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
 
@@ -52,9 +55,9 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
     buffer.flush()
 
-    log("Generated file:")
+    log("Generated file:", category=Log.SETUP)
     buffer.seek(0)
-    log(buffer.read())
+    log(buffer.read(), category=Log.SETUP)
 
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
@@ -68,19 +71,30 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                "-o", working_file.name,]
     command.append(buffer.name)
 
-    log(f"Running clang with command: {' '.join(command)}")
-    retcode = subprocess.run(command).returncode
+    log(f"Running clang with command: {' '.join(command)}", category=Log.SETUP)
+    # Capture clang's output: its warnings are noise on success but needed on failure.
+    clang = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    retcode = clang.returncode
     buffer.close()
-    log(f"Clang exitted with code {retcode}.")
+    log(f"Clang exitted with code {retcode}.", category=Log.SETUP)
 
     if retcode != 0:
+        log(clang.stderr)
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
         working_file.close()
         fail("ERROR(CLANG)", retcode)
+    log(clang.stderr, category=Log.SETUP)
 
     try:
         # This code is copied from python/test-ae.py to use SVF
-        pysvf.buildSVFModule(working_file.name)
+        svf_args = [working_file.name]
+
+        if Log.SVF in LOG_STATE:
+            svf_args.append("-stat=true")
+        else:
+            svf_args.append("-stat=false")
+
+        pysvf.buildSVFModule(svf_args)
         pag = pysvf.getPAG()
     except Exception as e:
         log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
@@ -95,7 +109,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     try:
         ae = AbstractExecution(pag)
         ae.analyse()
-        log(ae.results)
+        log(ae.results, category=Log.TRACE)
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
@@ -109,7 +123,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                 feasible_ids.add(callNode.getId())
 
         # CFL is a log-only cross-check: its 2-frame stack cannot prove safety or veto a finding.
-        log("Running CFL reachability analysis...")
+        log("Running CFL reachability analysis...", category=Log.REACH)
         cfl = CFLreachability(pag)
         cfl_results = cfl.analyze()
         cfl_ids = {n.getId() for ok, n in cfl_results.get("reach", []) if ok and n is not None}
@@ -138,17 +152,17 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             holder = n.getFun().getName() if n.getFun() else None
             if holder is None or holder not in analysed:
                 unreached.add(n.getId())
-        log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}")
-        log(f"AE visited reach_error sites  : {sorted(visited_sites)}")
+        log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
+        log(f"AE visited reach_error sites  : {sorted(visited_sites)}", category=Log.REACH)
         if unreached:
             gaps.append(f"reach_error sites in functions the analysis never entered: "
                         f"{sorted(unreached)}")
 
-        log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}")
-        log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}")
-        log(f"Coverage gaps recorded: {len(gaps)}")
+        log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}", category=Log.REACH)
+        log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}", category=Log.REACH)
+        log(f"Coverage gaps recorded: {len(gaps)}", category=Log.REACH)
         for reason in sorted(set(gaps))[:25]:
-            log(f"  gap: {reason}")
+            log(f"  gap: {reason}", category=Log.REACH)
 
         if feasible_ids:
             if claim_violations:
@@ -190,13 +204,13 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             spec = f.read().strip()
         loop_invariants = invariants.extract_loop_invariants(
             ae, pag, input_file_path, input_line_count)
-        log(f"Exported {len(loop_invariants)} loop invariant(s).")
+        log(f"Exported {len(loop_invariants)} loop invariant(s).", category=Log.SETUP)
         generate_witness.write_witness(
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
     else:
         # violation_sequence not implemented yet; produce nothing
-        log(f"No witness for result: {correctness}")
+        log(f"No witness for result: {correctness}", category=Log.SETUP)
 
     working_file.close()
     pysvf.releasePAG()
