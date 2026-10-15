@@ -125,6 +125,42 @@ class WitnessExportTests(unittest.TestCase):
         # last is uninitialised on entry; only the back edge has a value for it.
         self.assertNotIn('last', invariant['value'])
 
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_real_analysis_ignores_a_callers_variable_of_the_same_name(self):
+        # main's tmp is still in the state inside count(), where tmp names count's own
+        # uninitialised local, so exporting main's value there would be invalid.
+        program = (
+            'void count(void);\n'
+            'int main() {\n'
+            '  int tmp = 1;\n'
+            '  count();\n'
+            '  return tmp;\n'
+            '}\n'
+            'void count(void) {\n'
+            '  int tmp;\n'
+            '  int i = 0;\n'
+            '  while (i < 3) {\n'
+            '    tmp = i;\n'
+            '    i = i + 1;\n'
+            '  }\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Correct', output, output[-2000:])
+            invariant, = (entry['invariant'] for entry in yaml.safe_load(witness.read_text())[0]['content'])
+        self.assertEqual((invariant['location']['line'], invariant['location']['function']), (10, 'count'))
+        self.assertIn('(i >= 0)', invariant['value'])
+        self.assertNotIn('tmp', invariant['value'])
+
     def test_missing_locations_and_unparsed_source_are_skipped(self):
         head = mock.Mock()
         analysis = SimpleNamespace(cycle_head_to_cycle={head: None}, pre_abs_trace={})
