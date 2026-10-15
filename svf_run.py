@@ -177,7 +177,10 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # This property file bundles valid-deref, valid-free, and valid-memtrack.
         # We check our arrays in order and fail if any of them detected a violation.
         
-        if len(ae.results.get("nulldereference", [])) > 0:
+        if len(ae.results.get("bufferoverflow", [])) > 0:
+            print("MEMORY Incorrect")
+            correctness = "Incorrect"
+        elif len(ae.results.get("nulldereference", [])) > 0:
             print("MEMORY Incorrect(valid-deref)")
             correctness = "Incorrect"
             
