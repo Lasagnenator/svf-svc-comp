@@ -59,9 +59,14 @@ class CFLreachability:
             # -------------------------------------------------
             # handle Ret node
             elif isinstance(node, pysvf.RetICFGNode):
-                # don't handle external returns
                 callnode = node.getCallICFGNode()
-                if callnode and pysvf.isExtCall(callnode.getCalledFunction()):
+                callee = callnode.getCalledFunction() if callnode else None
+                if callee is None or pysvf.isExtCall(callee):
+                    # External and unknown-target calls pushed no frame, so there is
+                    # nothing to pop. Execution still continues past them, so keep
+                    # following the path.
+                    for e in node.getOutEdges():
+                        self.worklist.append((e.getDstNode(), stack))
                     continue
                 # pop stack
                 if stack:
@@ -69,8 +74,8 @@ class CFLreachability:
                 else:
                     continue # empty stack, skip
 
-                current_name = node.getFun().getName()
-                if top != current_name:
+                callee_name = callee.getName()
+                if top != callee_name:
                     continue # mismatched stack, skip
                 new_stack = stack[:-1]
 

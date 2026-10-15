@@ -15,15 +15,17 @@ runtime_files=(
     svf_run.py
     util.py
     LICENSE.TXT
-    README.MD
+    README.md
     smoketest.sh
     tests/basic_reach.c
     tests/cfl_test2.c
     tests/unreach-call.prp
+    tests/basic_mem_overflow.c
+    tests/valid-memsafety.prp
 )
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
-python_version="3.12"
+python_version="3.14"
 
 rm -rf "$package" "$archive"
 mkdir -p "$package"
@@ -32,6 +34,7 @@ mkdir -p "$package/tests"
 python3 -m pip install \
     --disable-pip-version-check \
     --no-cache-dir \
+    --no-compile \
     --only-binary=:all: \
     --python-version "$python_version" \
     --target "$package" \
@@ -43,13 +46,7 @@ done
 chmod 755 "$package/svf_run.py"
 chmod 755 "$package/smoketest.sh"
 
-# Fix SABER's import
-pysvf_root="$package/pysvf/SVF"
-cp -f \
-    "$pysvf_root/llvm-21.1.0.obj/lib/libLLVM.so" \
-    "$pysvf_root/Release-build/lib/libLLVM.so.21.1"
-
-# Memory analysis invokes these bundled executables and preloads bundled LLVM.
+# Memory analysis invokes these bundled executables.
 # Check that files are executable.
 test -x "$package/pysvf/SVF/Release-build/bin/ae"
 test -x "$package/pysvf/SVF/Release-build/bin/saber"
