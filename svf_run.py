@@ -224,7 +224,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
     else:
-        # violation_sequence not implemented yet; produce nothing
+        # generate_witness.write_violation_witness can write a violation witness, but the
+        # analysis does not yet produce the waypoints of a path to the violation.
         log(f"No witness for result: {correctness}")
 
     working_file.close()

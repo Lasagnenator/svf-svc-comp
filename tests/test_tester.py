@@ -186,6 +186,74 @@ class WitnessExportTests(unittest.TestCase):
             location = entry['content'][0]['invariant']['location']
             self.assertEqual(location, {'file_name': str(source), 'line': 1, 'column': 18, 'function': 'main'})
 
+    def test_violation_witness_renders_segments_and_shares_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { return 0; }\n')
+            violation, correctness = Path(directory) / 'violation.yml', Path(directory) / 'correctness.yml'
+            name = str(source)
+            segments = [
+                [{'type': 'branching', 'action': 'avoid', 'constraint': True, 'file_name': name, 'line': 2},
+                 {'type': 'branching', 'constraint': False, 'file_name': name, 'line': 3, 'column': 3}],
+                [{'type': 'assumption', 'constraint': 'v == 0', 'file_name': name, 'line': 4,
+                  'column': 3, 'function': 'main'}],
+                [{'type': 'target', 'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}],
+            ]
+            generate_witness.write_violation_witness(
+                segments, [name], 'G ! call(reach_error())', str(violation), data_model='ILP32')
+            generate_witness.write_witness([], [name], 'G ! call(reach_error())', str(correctness))
+            entry, = yaml.safe_load(violation.read_text())
+            other, = yaml.safe_load(correctness.read_text())
+
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['metadata']['format_version'], '2.0')
+        self.assertEqual(entry['metadata']['task']['data_model'], 'ILP32')
+        self.assertEqual(list(entry['metadata']), list(other['metadata']))
+        self.assertEqual(entry['content'], [
+            {'segment': [
+                {'waypoint': {'type': 'branching', 'action': 'avoid', 'constraint': {'value': 'true'},
+                              'location': {'file_name': name, 'line': 2}}},
+                {'waypoint': {'type': 'branching', 'action': 'follow', 'constraint': {'value': 'false'},
+                              'location': {'file_name': name, 'line': 3, 'column': 3}}}]},
+            {'segment': [
+                {'waypoint': {'type': 'assumption', 'action': 'follow',
+                              'constraint': {'value': 'v == 0', 'format': 'c_expression'},
+                              'location': {'file_name': name, 'line': 4, 'column': 3, 'function': 'main'}}}]},
+            {'segment': [
+                {'waypoint': {'type': 'target', 'action': 'follow',
+                              'location': {'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}}}]},
+        ])
+
+    def test_malformed_violation_witness_raises_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { return 0; }\n')
+            witness = Path(directory) / 'witness.yml'
+            name = str(source)
+            target = {'type': 'target', 'file_name': name, 'line': 1}
+            step = {'type': 'assumption', 'constraint': 'x > 0', 'file_name': name, 'line': 1}
+            malformed = {
+                'no segments': [],
+                'empty segment': [[], [target]],
+                'last segment is not the target': [[step]],
+                'target before the last segment': [[target], [target]],
+                'follow before the end of a segment': [[step, target]],
+                'segment ends with avoid': [[step | {'action': 'avoid'}], [target]],
+                'target with a constraint': [[target | {'constraint': 'x > 0'}]],
+                'assumption without a constraint': [[step | {'constraint': None}], [target]],
+                'branching on a string': [[{'type': 'branching', 'constraint': 'yes',
+                                            'file_name': name, 'line': 1}], [target]],
+                'line below 1': [[target | {'line': 0}]],
+                'file that is not an input': [[target | {'file_name': 'other.c'}]],
+                'unknown type': [[step | {'type': 'loop'}], [target]],
+            }
+            for case, segments in malformed.items():
+                with self.subTest(case):
+                    with self.assertRaises(ValueError):
+                        generate_witness.write_violation_witness(
+                            segments, [name], 'G ! call(reach_error())', str(witness))
+                    self.assertFalse(witness.exists())
+
     def test_wrapper_reports_missing_columns_without_starting_cpachecker(self):
         with tempfile.TemporaryDirectory() as directory:
             witness = Path(directory) / 'witness.yml'
