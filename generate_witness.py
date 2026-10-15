@@ -1,5 +1,5 @@
 """
-Output a format 2.1 witness.
+Output a YAML correctness witness (format 2.0 by default).
 """
 
 import datetime
@@ -78,7 +78,16 @@ def write_witness(invariants: list, input_files: list, specification: str, outpu
     }
     yaml_list[-1]['content'] = []
     for invariant in invariants:
-
+      if (
+          not isinstance(invariant, dict)
+          or invariant.get('type') not in ('loop_invariant', 'location_invariant')
+          or invariant.get('file_name') not in input_files
+          or any(type(invariant.get(key)) is not int or invariant[key] < 1
+                 for key in ('line', 'column'))
+          or any(not isinstance(invariant.get(key), str) or not invariant[key].strip()
+                 for key in ('function', 'value'))
+      ):
+        continue
       yaml_list[-1]['content'].append(dict())
       yaml_list[-1]['content'][-1] = {'invariant': {
           'type': invariant['type'],  # can be loop_invariant or location_invariant
