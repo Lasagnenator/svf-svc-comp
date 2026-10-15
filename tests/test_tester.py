@@ -191,7 +191,7 @@ class TesterUnitTests(unittest.TestCase):
 
         with tester.MeasuredPopen([sys.executable, "-c", "pass"]) as process:
             with mock.patch.object(tester.os, "wait4", wraps=tester.os.wait4) as wait:
-                process._internal_poll()
+                process.poll()
                 wait.assert_called_once_with(process.pid, tester.os.WNOHANG)
             process.wait(timeout=10)
             self.assertGreater(process.peak_memory_mib, 0)

@@ -453,8 +453,18 @@ class MeasuredPopen(subprocess.Popen):
         except ChildProcessError:
             return self.pid, 0
 
-    def _internal_poll(self, _deadstate=None):
-        return super()._internal_poll(_deadstate, _waitpid=self._wait_with_usage)
+    def poll(self):
+        # Popen.poll reaps through _internal_poll, whose private arguments changed in
+        # Python 3.14, so reap here instead and record the exit status the same way.
+        if self.returncode is None:
+            try:
+                pid, status = self._wait_with_usage(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                self.returncode = 0  # already reaped elsewhere, as Popen itself assumes
+            else:
+                if pid == self.pid:
+                    self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
 
 
 def limit_resources(cpu_seconds, memory_bytes):
