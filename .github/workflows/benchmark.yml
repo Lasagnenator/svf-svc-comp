@@ -7,20 +7,14 @@ on:
     branches: [master]
   workflow_dispatch:
     inputs:
-      category:
-        description: Meta category to sample
-        type: choice
-        default: reachsafety
-        options: [reachsafety, memsafety, softwaresystems]
       sample_count:
         description: Number of property runs (max 100)
-        default: "50"
+        default: "100"
 
 env:
   BENCH_REVISION: svcomp26
   BENCH_DIR: ${{ github.workspace }}/sv-benchmarks
-  CATEGORY: ${{ github.event.inputs.category || 'reachsafety' }}
-  SAMPLE_COUNT: ${{ github.event.inputs.sample_count || '50' }}
+  SAMPLE_COUNT: ${{ github.event.inputs.sample_count || '100' }}
   SEED: ${{ github.sha }}
 
 jobs:
@@ -87,7 +81,8 @@ jobs:
         if: steps.bench-cache.outputs.cache-hit != 'true'
         run: |
           python tests/fetch_benchmarks.py \
-            --category "$CATEGORY" \
+            --category reachsafety \
+            --category memsafety \
             --metadata-only \
             --revision "$BENCH_REVISION" \
             --dest "$BENCH_DIR" \
@@ -96,7 +91,8 @@ jobs:
       - name: Select deterministic sample
         run: |
           python tests/tester.py "$BENCH_DIR" "$PWD" \
-            --category "$CATEGORY" \
+            --category reachsafety \
+            --category memsafety \
             --sample-count "$SAMPLE_COUNT" \
             --seed "$SEED" \
             --dry-run \
@@ -111,7 +107,8 @@ jobs:
       - name: Run benchmark sample
         run: |
           python tests/tester.py "$BENCH_DIR" "$PWD" \
-            --category "$CATEGORY" \
+            --category reachsafety \
+            --category memsafety \
             --sample-count "$SAMPLE_COUNT" \
             --seed "$SEED" \
             --cpu-limit 15 \
@@ -122,6 +119,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-sample-${{ env.CATEGORY }}
+          name: benchmark-sample-reachsafety-memsafety
           path: ${{ runner.temp }}/results
           retention-days: 14
