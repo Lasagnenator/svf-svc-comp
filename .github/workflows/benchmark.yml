@@ -61,6 +61,9 @@ jobs:
           sudo apt-get install -y clang-21
           sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
           clang --version
+      
+      - name: Run smoketest
+        run: bash smoketest.sh
 
       - name: Validate sample size
         run: |
