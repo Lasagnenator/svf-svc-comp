@@ -5,6 +5,7 @@ tests/*
 !tests/fetch_benchmarks.py
 !tests/validate_witness.sh
 venv
+tests/mem-safety/
 test-results/
 dist/
 sv-benchmarks/

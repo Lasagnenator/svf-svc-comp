@@ -2820,11 +2820,19 @@ class AbstractExecution:
                 self.buf_overflow_helper.reportNullDereference(node, msg)
                 self.results["nulldereference"].append(node)
                 return
+            self.recordGap(
+                f"Cannot establish pointer validity at node {node.getId()}: "
+                f"{ptr_val}"
+            )
+            return
 
         # 3. Use After Free & Null Address Check
         if ptr_val.isAddr():
             addrs = ptr_val.getAddrs()
             if len(addrs) == 0:
+                self.recordGap(
+                    f"No known pointer targets at node {node.getId()}"
+                )
                 return
 
             # MUST-Alias Check: Are ALL possible addresses NULL?
