@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       sample_count:
-        description: Number of property runs (max 100)
+        description: Number of property runs
         default: "100"
 
 env:
@@ -64,13 +64,6 @@ jobs:
       
       - name: Run smoketest
         run: bash smoketest.sh
-
-      - name: Validate sample size
-        run: |
-          if [ "$SAMPLE_COUNT" -gt 100 ]; then
-            echo "sample_count must not exceed 100" >&2
-            exit 1
-          fi
 
       # Only task definitions and property files are cached; C sources are fetched per sample.
       - name: Cache benchmark metadata
