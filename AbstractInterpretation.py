@@ -2090,34 +2090,23 @@ class AbstractExecution:
                 return
 
             try:
+                # FIX: Remove the caching for loops cuz it throws exception --> Calculate GEP offset manually
                 self.ae_manager.updateAbsState(node, abstract_state)
-                pointer = gep.getRHSVar()
-                index_iv = self.ae_manager.getGepElementIndex(gep)
-                
-                if index_iv is not None and index_iv.isInterval():
-                    # Fast-path cache initialization
-                    if not hasattr(self, '_type_size_cache'):
-                        self._type_size_cache = {}
-                    
-                    ptr_type = pointer.getType()
-                    type_id = ptr_type.getId() if ptr_type else None
-                    
-                    # Compute only on cache miss
-                    if type_id not in self._type_size_cache:
-                        elem_size = 1
-                        if ptr_type and ptr_type.isPointerTy():
-                            elem_type = self.ae_manager.getPointeeElement(pointer, node)
-                            if elem_type:
-                                elem_size = elem_type.getTypeOfElement().getByteSize() if elem_type.isArrayTy() else elem_type.getByteSize()
-                        self._type_size_cache[type_id] = elem_size if elem_size > 0 else 1
-                        
-                    elem_size = self._type_size_cache[type_id]
-                    gep_increment = index_iv * pysvf.IntervalValue(elem_size, elem_size)
-                    ptr_offsets[lhs] = pysvf.AbstractValue(base_offset + gep_increment)
+                gep_increment = self.ae_manager.getGepByteOffset(gep)
+
+                if isinstance(gep_increment, pysvf.IntervalValue):
+                    ptr_offsets[lhs] = pysvf.AbstractValue(
+                        base_offset + gep_increment
+                    )
                 else:
-                    ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
-            except Exception:
-                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+                    ptr_offsets[lhs] = pysvf.AbstractValue(
+                        pysvf.IntervalValue.top()
+                    )
+            except Exception as exc:
+                log(f"Failed to calculate GEP offset at node {node.getId()}: {exc}")
+                ptr_offsets[lhs] = pysvf.AbstractValue(
+                    pysvf.IntervalValue.top()
+                )
         else:
             ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
 
@@ -2421,8 +2410,12 @@ class AbstractExecution:
                 # Dynamic array fallback check (VLA / mallocs with 0 static size)
                 if obj_size == 0 and not base_obj.isConstantByteSize():
                     must_overflow = False
-                    if current_offset.isTop() or int(current_offset.lb()) < 0:
-                        may_overflow = True
+                    self.recordGap(
+                        f"Cannot verify access to dynamically sized object "
+                        f"{base_obj.getId()} at node {node.getId()}; "
+                        f"pointer offset is {current_offset}"
+                    )
+
                     continue 
 
                 # Standard verification evaluation
