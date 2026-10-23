@@ -96,8 +96,15 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     # ae first
     try:
         ae = AbstractExecution(pag)
+        # Memory verdicts are Unknown on any gap, so stop at a dropped call instead of running on.
+        ae.stop_on_gap = prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp')
         ae.analyse()
         log(ae.results)
+    except AnalysisIncomplete as e:
+        log(f"Memory analysis inconclusive, stopped at: {e}; reporting Unknown.")
+        print("Unknown")
+        working_file.close()
+        return
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
@@ -117,7 +124,12 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         cfl_results = cfl.analyze()
         cfl_ids = {n.getId() for ok, n in cfl_results.get("reach", []) if ok and n is not None}
 
-        gaps = list(ae.results.get("incomplete", []))
+        # Possible memory errors stay gaps here: the analysis is not yet sound past them.
+        # Those in global initialisers do not affect which paths reach reach_error.
+        gaps = list(ae.results.get("incomplete", [])) + list(ae.results.get("memory_gaps", []))
+        ignored = len(ae.results.get("global_memory_gaps", []))
+        if ignored:
+            log(f"Ignored {ignored} memory gap(s) in global initialisers")
 
         ###SVF SV-COMP-ADDITION
         # An empty reach list is ambiguous: a never-visited site is a coverage gap, not a proof.
@@ -173,6 +185,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             print("REACH Correct")
             correctness = "Correct"
             
+    elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
+            ae.results.get("incomplete") or ae.results.get("memory_gaps")
+            or ae.results.get("global_memory_gaps")):
+        # Dropped paths or unproven memory errors: neither safety nor a violation is shown.
+        gaps = (ae.results.get("incomplete", []) + ae.results.get("memory_gaps", [])
+                + ae.results.get("global_memory_gaps", []))
+        log(f"Memory analysis inconclusive ({len(gaps)} gap(s)); reporting Unknown.")
+        for reason in sorted(set(gaps))[:25]:
+            log(f"  gap: {reason}")
+        print("Unknown")
+        correctness = "Unknown"
+
     elif prop_file_name == 'valid-memsafety.prp':
         # This property file bundles valid-deref, valid-free, and valid-memtrack.
         # We check our arrays in order and fail if any of them detected a violation.
