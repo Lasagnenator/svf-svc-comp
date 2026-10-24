@@ -25,7 +25,7 @@ nondet_types = {
     "pchar": "char*",
     "short": "short",
     "size_t": "size_t",
-    "u32": "u32",
+    "u32": "unsigned int",
     "uchar": "unsigned char",
     "uint": "unsigned int",
     "uint128": "unsigned __int128",

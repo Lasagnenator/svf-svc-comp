@@ -1016,7 +1016,7 @@ class AbstractExecution:
 
         # Handle Direct Calls
         fun_name = callee.getName()
-
+        
         # Narrow the caller before the body is walked; the body is then analysed as usual,
         # because the return node takes its state from the callee's exit.
         if fun_name in self.ASSUME_HELPERS and not self.applyAssumption(node):
@@ -1157,7 +1157,7 @@ class AbstractExecution:
                 else:
                     raise AssertionError(f"Your implementation failed to detect the buffer overflow! {callNode}")
             else:
-                print(f"Your implementation failed to detect the buffer overflow! {callNode}")
+                log(f"Your implementation failed to detect the buffer overflow! {callNode}")
                 assert False
     """
     Join Lifetime
@@ -1636,7 +1636,7 @@ class AbstractExecution:
        - Process its WTO components to analyze its control flow.
     """
     def analyse(self):
-        print("Entering Debugging")
+        log("Entering Debugging")
         self.initWto()
         self.handleGlobalNode()
         # Process the main function if it exists
@@ -1689,7 +1689,7 @@ class AbstractExecution:
                     elif lifetime == Lifetime.MAY_FREED:
                         self.recordMemoryGap(f"Object {obj_id} may be leaked (MAY_FREED at exit)")
             else:
-                print("Warning: Could not locate the exit node for the main function.")
+                log("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
         self.ensureAllAssertsValidated()
