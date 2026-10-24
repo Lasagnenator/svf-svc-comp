@@ -475,7 +475,10 @@ class AbstractExecution:
         self.pre_lifetime_trace = {}
         self.post_lifetime_trace = {}
 
-        #used for tracking offsets for pointers
+        # Used for tracking offsets for pointers
+        # This is because the current SVF architecture collapsed the array 
+        # So arry[10]; p = &array[2] and q = &p[3] will cause p, q and array to be the same Object ID
+        # Cannot make p an ObjectID array + offset because it may cause address collision
         self.pre_ptr_offset_trace = {}   # node -> {var_id: IntervalValue}
         self.post_ptr_offset_trace = {}  # node -> {var_id: IntervalValue}
 
@@ -747,6 +750,12 @@ class AbstractExecution:
 
         for stmt in node.getSVFStmts():
             self.updateAbsState(stmt)
+            
+        # Save the completed post-state into the C++ manager.
+        self.ae_manager.updateAbsState(
+            node,
+            self.post_abs_trace[node]
+        )
 
         if isinstance(node, pysvf.CallICFGNode):
             self.handleCallSite(node)
@@ -1767,12 +1776,17 @@ class AbstractExecution:
 
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
+        ## Lecture week 8 algorithm
+        # Get node from addr
         node = addr.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         assert isinstance(abstract_state, AbstractState)
-        abstract_state[addr.getRHSVarID()] = AbstractValue(self.initObjVar(addr.getRHSVar().asObjVar()))
+        # Create an object variable
+        mem_object = self.initObjVar(addr.getRHSVar().asObjVar())
+        abstract_state[addr.getRHSVarID()] = AbstractValue(mem_object)
         abstract_state[addr.getLHSVarID()] = abstract_state[addr.getRHSVarID()]
         
+        ## Tracking pointers offset
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
         ptr_offsets[addr.getLHSVarID()] = AbstractValue(pysvf.IntervalValue(0, 0))
 
@@ -2064,51 +2078,88 @@ class AbstractExecution:
 
     #TODO : Implement the state updates for Copy, Binary, Store, Load, Gep, Phi
     # TODO: your code starts from here
-    def updateStateOnGep(self, gep: pysvf.GepStmt):
+    def updatePointerOffsetOnGep(self, gep: pysvf.GepStmt):
+        """Record the LHS pointer's accumulated byte offset for a GEP."""
         node = gep.getICFGNode()
+        lhs = gep.getLHSVarID()
+        rhs = gep.getRHSVarID()
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+
+        increment = self.ae_manager.getGepByteOffset(gep)
+        old_offset = ptr_offsets.get(rhs)
+        base_offset = (
+            old_offset.getInterval()
+            if old_offset is not None and old_offset.isInterval()
+            else pysvf.IntervalValue.top()
+        )
+
+        ptr_offsets[lhs] = pysvf.AbstractValue(base_offset + increment)
+
+    def updatePointerOffsetOnLoad(self, load: pysvf.LoadStmt, loaded: pysvf.AbstractValue):
+        node = load.getICFGNode()
+        lhs = load.getLHSVarID()
+        rhs = load.getRHSVarID()
+
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+
+        # Loading an integer: result has no pointer offset.
+        if not loaded.isAddr():
+            ptr_offsets.pop(lhs, None)
+            return
+
+        merged_offset = None
+
+        # RHS points to the memory cell containing the pointer.
+        for memory_address in abstract_state.getVar(rhs).getAddrs():
+            stored_offset = ptr_offsets.get(-memory_address)
+
+            if stored_offset is None:
+                ptr_offsets[lhs] = pysvf.AbstractValue(
+                    pysvf.IntervalValue.top()
+                )
+                return
+
+            if merged_offset is None:
+                merged_offset = stored_offset.clone()
+            else:
+                merged_offset.join_with(stored_offset)
+        
+        # Store the new offset, top if rhs = None
+        ptr_offsets[lhs] = (
+            merged_offset
+            if merged_offset is not None
+            else pysvf.AbstractValue(pysvf.IntervalValue.top())
+        )
+
+    def updateStateOnGep(self, gep: pysvf.GepStmt):
+        ## Week 8 Lecture Algorithms
+        node = gep.getICFGNode()
+        abstract_state = self.post_abs_trace[node]
         assert isinstance(abstract_state, AbstractState)
 
         lhs = gep.getLHSVarID()
         rhs = gep.getRHSVarID()
-        rhs_var = abstract_state.getVar(rhs)
 
-        # Deferred cloning pass-through
-        if rhs_var.isAddr():
-            abstract_state[lhs] = rhs_var 
-        else:
-            abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+        if not abstract_state.getVar(rhs).isAddr():
+            abstract_state[lhs] = pysvf.AbstractValue(
+                pysvf.IntervalValue.top()
+            )
+            self.post_ptr_offset_trace.setdefault(node, {})[lhs] = (
+                pysvf.AbstractValue(pysvf.IntervalValue.top())
+            )
+            return
 
-        offset_val = ptr_offsets.get(rhs)
-        base_offset = offset_val.getInterval() if (offset_val and offset_val.isInterval()) else pysvf.IntervalValue(0, 0)
+        self.ae_manager.updateAbsState(node, abstract_state)
 
-        if rhs_var.isAddr():
-            # Alias Cutoff: Stop tracking bounds for pointers that alias massively
-            if len(rhs_var.getAddrs()) > 50:
-                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
-                return
+        # Create SVF's symbolic address for the derived pointer.
+        gep_addresses = self.ae_manager.getGepObjAddrs(
+            gep.getRHSVar(),
+            self.ae_manager.getGepElementIndex(gep)
+        )
 
-            try:
-                # FIX: Remove the caching for loops cuz it throws exception --> Calculate GEP offset manually
-                self.ae_manager.updateAbsState(node, abstract_state)
-                gep_increment = self.ae_manager.getGepByteOffset(gep)
-
-                if isinstance(gep_increment, pysvf.IntervalValue):
-                    ptr_offsets[lhs] = pysvf.AbstractValue(
-                        base_offset + gep_increment
-                    )
-                else:
-                    ptr_offsets[lhs] = pysvf.AbstractValue(
-                        pysvf.IntervalValue.top()
-                    )
-            except Exception as exc:
-                log(f"Failed to calculate GEP offset at node {node.getId()}: {exc}")
-                ptr_offsets[lhs] = pysvf.AbstractValue(
-                    pysvf.IntervalValue.top()
-                )
-        else:
-            ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+        abstract_state[lhs] = pysvf.AbstractValue(gep_addresses)
+        self.updatePointerOffsetOnGep(gep)
 
     #TODO: your code starts from here
     def updateStateOnStore(self, store: pysvf.StoreStmt):
@@ -2240,47 +2291,45 @@ class AbstractExecution:
             fail("Unknown", 0)
 
 
+    def loadAbstractValue(self, load: pysvf.LoadStmt) -> pysvf.AbstractValue:
+        """Load through the RHS pointer, using TOP when SVF returns no useful value."""
+        node = load.getICFGNode()
+        loaded = self.ae_manager.loadValue(load.getRHSVar(), node)
+
+        if (
+            not loaded.isAddr()
+            and (
+                not loaded.isInterval()
+                or self.intervalIsEmpty(loaded.getInterval())
+            )
+        ):
+            return pysvf.AbstractValue(pysvf.IntervalValue.top())
+
+        return loaded
+
+
     #TODO: your code starts from here
     def updateStateOnLoad(self, load: pysvf.LoadStmt):
         node = load.getICFGNode()
         abstract_state = self.post_abs_trace[node]
-        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         lhs = load.getLHSVarID()
         rhs = load.getRHSVarID()
 
+        # Memory-safety checks before dereferencing RHS
         self.checkMemorySafety(node, rhs)
         self.checkBufferOverflow(node, rhs)
 
-        if abstract_state.getVar(rhs).isAddr():
-            self.ae_manager.updateAbsState(node, abstract_state)
-            loaded = self.ae_manager.loadValue(load.getRHSVar(), node)
-            
-            if not loaded.isAddr() and (not loaded.isInterval() or self.intervalIsEmpty(loaded.getInterval())):
-                loaded = pysvf.AbstractValue(pysvf.IntervalValue.top())
-            abstract_state[lhs] = loaded
-            
-            # --- FIX: Retrieve Pointer Offsets from Memory ---
-            if loaded.isAddr():
-                merged_offset = None
-                for addr in abstract_state.getVar(rhs).getAddrs():
-                    mem_key = -addr
-                    off = ptr_offsets.get(mem_key)
-                    if off is not None:
-                        if merged_offset is None:
-                            merged_offset = off.clone()
-                        else:
-                            merged_offset.join_with(off)
-                            
-                if merged_offset is not None:
-                    ptr_offsets[lhs] = merged_offset
-                else:
-                    ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
-            else:
-                ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
-        else:
+        # Invalid/non-pointer RHS: conservatively make result unknown
+        if not abstract_state.getVar(rhs).isAddr():
             abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
-            ptr_offsets[lhs] = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
+            return
+
+        self.ae_manager.updateAbsState(node, abstract_state)
+
+        loaded = self.loadAbstractValue(load)
+        abstract_state[lhs] = loaded
+        self.updatePointerOffsetOnLoad(load, loaded)
 
     #TODO: your code starts from here
     def updateStateOnCopy(self, copy: pysvf.CopyStmt):
