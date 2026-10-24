@@ -20,7 +20,7 @@ runtime_files=(
     tests/basic_reach.c
     tests/cfl_test2.c
     tests/unreach-call.prp
-    tests/basic_mem_overflow.c
+    tests/basic_mem.c
     tests/valid-memsafety.prp
 )
 

@@ -26,5 +26,5 @@ run() {
 # Expect reach to be correct
 run "./tests/basic_reach.c" "./tests/unreach-call.prp" "REACH Incorrect" not
 
-# Expect buffer overflow to be detected and print "MEMORY Incorrect"
-run "./tests/basic_mem_overflow.c" "./tests/valid-memsafety.prp" "MEMORY Incorrect" has
+# Expect unfreed memory to be detected and print "MEMORY Incorrect"
+run "./tests/basic_mem.c" "./tests/valid-memsafety.prp" "MEMORY Incorrect" has

@@ -4,7 +4,7 @@ import traceback
 from enum import Enum as _Enum  # underscore: not re-exported by `from util import *`
 from typing import NoReturn
 
-VERSION = "2.3"
+VERSION = "2.4"
 
 def get_real_path(relative):
     # Find the real path given a path relative to the current file
