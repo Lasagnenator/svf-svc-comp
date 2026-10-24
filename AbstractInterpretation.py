@@ -1403,18 +1403,31 @@ class AbstractExecution:
             elif v0.isAddr() and v1.isAddr():
                 addrs0 = set(v0.getAddrs())
                 addrs1 = set(v1.getAddrs())
-                if predicate == Predicate.ICMP_EQ and not addrs0.intersection(addrs1):
+                common_bases = addrs0.intersection(addrs1)
+
+                # Different objects cannot be equal.
+                if predicate == Predicate.ICMP_EQ and not common_bases:
                     return False
+
+                # Different objects are definitely unequal.
+                # Do not compare their offsets.
+                if predicate == Predicate.ICMP_NE and not common_bases:
+                    return True
+
                 if predicate == Predicate.ICMP_NE and len(addrs0) == 1 and addrs0 == addrs1:
                     if node in self.post_ptr_offset_trace:
                         off0 = self.post_ptr_offset_trace[node].get(id0)
                         off1 = self.post_ptr_offset_trace[node].get(id1)
+
                         if off0 and off1 and off0.isInterval() and off1.isInterval():
-                            if off0.getInterval().is_numeral() and off0.getInterval().equals(off1.getInterval()):
+                            if (
+                                off0.getInterval().is_numeral()
+                                and off0.getInterval().equals(off1.getInterval())
+                            ):
                                 return False
                     else:
                         return False
-
+                        
             # Pointer Offset Narrowing for Pointer Comparisons (e.g. ptr1 < ptr2) ---
             if node in self.post_ptr_offset_trace:
                 ptr_offsets = self.post_ptr_offset_trace[node]
