@@ -290,7 +290,7 @@ class AbstractExecutionHelper:
                 for node, msg in reports:
                     log(f"{node}: {msg}", category=Log.MEMORY)
                     log("---------------------------------------------", category=Log.MEMORY)
-                log()
+                log("", category=Log.MEMORY)
 
 
     def updateGepObjOffsetFromBase(self, abstractState: pysvf.AbstractState, gepAddrs: pysvf.AddressValue, objAddrs: pysvf.AddressValue, offset: pysvf.IntervalValue):

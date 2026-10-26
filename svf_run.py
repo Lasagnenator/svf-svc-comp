@@ -18,8 +18,6 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
-    parser.add_argument("--verbose", "-v", action="append", choices=[c.value for c in Log], default=[],
-                        help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
     parser.add_argument("--claim-violations", action="store_true",
                         help="report a violation whenever the abstract state says reach_error "
@@ -31,7 +29,6 @@ def main():
 
     args, extra = parser.parse_known_args()
 
-    set_verbose(args.verbose)
     log(f"Arguments: {args}", category=Log.SETUP)
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
@@ -90,10 +87,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # This code is copied from python/test-ae.py to use SVF
         svf_args = [working_file.name]
 
-        if Log.SVF in LOG_STATE:
-            svf_args.append("-stat=true")
-        else:
-            svf_args.append("-stat=false")
+        svf_args.append("-stat=true")
 
         pysvf.buildSVFModule(svf_args)
         pag = pysvf.getPAG()
