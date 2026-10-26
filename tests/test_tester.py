@@ -225,6 +225,68 @@ class WitnessExportTests(unittest.TestCase):
                               'location': {'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}}}]},
         ])
 
+    def test_memory_findings_map_to_the_violated_subproperty(self):
+        self.assertEqual(violations.memory_violation({'useafterfree': [1]}), ('useafterfree', 'valid-deref'))
+        self.assertEqual(violations.memory_violation({'bufferoverflow': [1]}), ('bufferoverflow', 'valid-deref'))
+        self.assertEqual(violations.memory_violation({'memoryleak': [7], 'doublefree': [1]}),
+                         ('doublefree', 'valid-free'))
+        self.assertEqual(violations.memory_violation({'badfree': [1]}), ('badfree', 'valid-free'))
+        self.assertEqual(violations.memory_violation({'memoryleak': [7]}), ('memoryleak', 'valid-memtrack'))
+        self.assertIsNone(violations.memory_violation({'bufferoverflow': [], 'reach': [(True, None)]}))
+
+        prp = (ROOT / 'tests' / 'valid-memsafety.prp').read_text()
+        self.assertEqual(violations.specification_for(prp, 'valid-deref'),
+                         'CHECK( init(main()), LTL(G valid-deref) )')
+        self.assertEqual(violations.specification_for(prp, 'valid-memtrack'),
+                         'CHECK( init(main()), LTL(G valid-memtrack) )')
+        # A property file without the subproperty is kept whole, e.g. valid-memcleanup.prp.
+        self.assertEqual(violations.specification_for(prp, 'valid-memcleanup'), prp.strip())
+
+    def test_leaks_target_the_statement_before_main_exits(self):
+        def node(location, function='main'):
+            site = mock.Mock()
+            site.getSourceLoc.return_value = location
+            site.getFun.return_value.getName.return_value = function
+            return site
+
+        exit_node = node('function ret: { "ln": 2, "file": "tmp.c" }')
+        exit_node.getInEdges.return_value = [SimpleNamespace(getSrcNode=lambda: node('{"ln": 9, "cl": 3}'))]
+        self.assertEqual(violations.memory_segments([4, 5], exit_node, 'program.c'),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 9, 'column': 3,
+                            'function': 'main'}]])
+        deref = node('{"ln": 6, "cl": 5}')
+        self.assertEqual(violations.memory_segments([deref], exit_node, 'program.c')[0][0]['line'], 6)
+        self.assertIsNone(violations.memory_segments([4], None, 'program.c'))
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_use_after_free_writes_a_valid_deref_violation_witness(self):
+        program = (
+            '#include <stdlib.h>\n'
+            'int main() {\n'
+            '  int *p = malloc(sizeof(int));\n'
+            '  free(p);\n'
+            '  *p = 1;\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'valid-memsafety.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            # A use after free is an invalid dereference, not an invalid free.
+            self.assertIn('MEMORY Incorrect(valid-deref)', output, output[-2000:])
+            entry, = yaml.safe_load(witness.read_text())
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['metadata']['task']['specification'], 'CHECK( init(main()), LTL(G valid-deref) )')
+        target, = entry['content'][0]['segment']
+        self.assertEqual((target['waypoint']['type'], target['waypoint']['location']['line']), ('target', 5))
+
     def test_reach_error_target_prefers_cfl_reachable_then_earliest_site(self):
         def site(node_id, location, function='main'):
             node = mock.Mock()

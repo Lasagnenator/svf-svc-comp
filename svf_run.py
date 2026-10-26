@@ -176,26 +176,13 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             
     elif prop_file_name == 'valid-memsafety.prp':
         # This property file bundles valid-deref, valid-free, and valid-memtrack.
-        # We check our arrays in order and fail if any of them detected a violation.
-        
-        if len(ae.results.get("bufferoverflow", [])) > 0:
-            print("MEMORY Incorrect")
+        # violations.MEMORY_FINDINGS checks our arrays in order and maps each to the
+        # subproperty it violates.
+        memory = violations.memory_violation(ae.results)
+        if memory:
+            kind, subproperty = memory
+            print(f"MEMORY Incorrect({subproperty})")
             correctness = "Incorrect"
-        elif len(ae.results.get("nulldereference", [])) > 0:
-            print("MEMORY Incorrect(valid-deref)")
-            correctness = "Incorrect"
-            
-        elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
-            print("MEMORY Incorrect(valid-free)")
-            correctness = "Incorrect"
-            
-        elif len(ae.results.get("memoryleak", [])) > 0:
-            print("MEMORY Incorrect(valid-memtrack)")
-            correctness = "Incorrect"
-        elif len(ae.results.get("badfree", [])) > 0:
-            print("MEMORY Incorrect(valid-free)")
-            correctness = "Incorrect"
-            
         else:
             print("MEMORY Correct")
             correctness = "Correct"
@@ -224,14 +211,24 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         generate_witness.write_witness(
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
-    elif correctness == "Incorrect" and prop_file_name == 'unreach-call.prp':
+    elif correctness == "Incorrect":
         with open(prop_file_path) as f:
             spec = f.read().strip()
-        segments = violations.reach_error_segments(
-            ae.results.get("reach", []), cfl_ids, input_file_path, input_line_count)
+        if prop_file_name == 'unreach-call.prp':
+            segments = violations.reach_error_segments(
+                ae.results.get("reach", []), cfl_ids, input_file_path, input_line_count)
+        elif prop_file_name == 'valid-memsafety.prp':
+            # Name only the violated subproperty, not the whole property file.
+            spec = violations.specification_for(spec, subproperty)
+            segments = violations.memory_segments(
+                ae.results[kind], violations.main_exit(pag), input_file_path, input_line_count)
+        else:
+            segments = violations.memory_segments(
+                ae.results.get("memoryleak", []), violations.main_exit(pag),
+                input_file_path, input_line_count)
         try:
             if segments is None:
-                raise ValueError("no feasible reach_error site has a usable source location")
+                raise ValueError("no violation site has a usable source location")
             generate_witness.write_violation_witness(
                 segments, [input_file_path], spec, witness_file_path, witness_format,
                 'ILP32' if bits == "32" else 'LP64')
@@ -239,7 +236,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         except ValueError as e:
             log(f"No violation witness: {e}")
     else:
-        # Memory-safety violations do not produce a witness yet.
         log(f"No witness for result: {correctness}")
 
     working_file.close()
