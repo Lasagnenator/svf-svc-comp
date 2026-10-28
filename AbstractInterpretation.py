@@ -713,8 +713,7 @@ class AbstractExecution:
             callNode = node.asCall()
             # An indirect call SVF could not resolve has no callee
             callee = callNode.getCalledFunction()
-            if callee is not None and callee.getName() in ("reach_error", "__VERIFIER_error"):
-                if is_feasible and (True, callNode) not in self.results["reach"]:
+            if is_feasible and (True, callNode) not in self.results["reach"]:
                     self.results["reach"].append((True, callNode))
 
         if not is_feasible:
@@ -1690,6 +1689,8 @@ class AbstractExecution:
                 log("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
+        if self.results["incomplete"]:
+            fail("Unknown", 0)
         self.ensureAllAssertsValidated()
         self.buf_overflow_helper.printReport()
 
