@@ -274,20 +274,20 @@ class AbstractExecutionHelper:
         
         total_bugs = len(self.node_to_bug_info)
         if total_bugs == 0:
-            print("No memory safety violations detected. Program is safe!")
-            print("=======================================================\n")
+            log("No memory safety violations detected. Program is safe!")
+            log("=======================================================\n")
             return
 
-        print(f"Total Memory Safety Violations Found: {total_bugs}\n")
-        
+        log(f"Total Memory Safety Violations Found: {total_bugs}\n")
+
         for category, reports in self.bug_reports.items():
             if len(reports) > 0:
-                print(f"###################### {category} ({len(reports)} found) ######################")
-                print("---------------------------------------------")
+                log(f"###################### {category} ({len(reports)} found) ######################")
+                log("---------------------------------------------")
                 for node, msg in reports:
-                    print(f"{node}: {msg}")
-                    print("---------------------------------------------")
-                print()
+                    log(f"{node}: {msg}")
+                    log("---------------------------------------------")
+                log("")
 
 
     def updateGepObjOffsetFromBase(self, abstractState: pysvf.AbstractState, gepAddrs: pysvf.AddressValue, objAddrs: pysvf.AddressValue, offset: pysvf.IntervalValue):
@@ -1002,7 +1002,7 @@ class AbstractExecution:
 
         # Handle Direct Calls
         fun_name = callee.getName()
-        print(fun_name)
+        log(fun_name)
 
         # Narrow the caller before the body is walked; the body is then analysed as usual,
         # because the return node takes its state from the callee's exit.
@@ -1103,14 +1103,14 @@ class AbstractExecution:
 
             # Check if the interval for the argument is infinite
             if abstract_state[arg0].getInterval().isTop():
-                print(f"svf_assert Fail. {callNode}")
+                log(f"svf_assert Fail. {callNode}")
                 assert False
             else:
                 if (abstract_state[arg0].getInterval().equals(IntervalValue(1, 1)) or
                         abstract_state[arg0].getInterval().equals(IntervalValue(-1, -1))):
-                    print(f"The assertion ({callNode}) is successfully verified!!")
+                    log(f"The assertion ({callNode}) is successfully verified!!")
                 else:
-                    print(f"The assertion ({callNode}) is unsatisfiable!!")
+                    log(f"The assertion ({callNode}) is unsatisfiable!!")
                     assert False
 
         elif callNode.getCalledFunction().getName() == "OVERFLOW":
@@ -1137,17 +1137,17 @@ class AbstractExecution:
                                 + access_offset >= size
                         )
                         if overflow:
-                            print("obj len: {}, you want to access: {}.".format(size, access_offset))
+                            log("obj len: {}, you want to access: {}.".format(size, access_offset))
                     else:
                         raise AssertionError("Pointer not found in gepObjOffsetFromBase")
 
                 if overflow:
-                    print("Your implementation successfully detected the buffer overflow")
+                    log("Your implementation successfully detected the buffer overflow")
                 else:
-                    print(f"Your implementation failed to detect the buffer overflow! {callNode}")
+                    log(f"Your implementation failed to detect the buffer overflow! {callNode}")
                     assert False
             else:
-                print(f"Your implementation failed to detect the buffer overflow! {callNode}")
+                log(f"Your implementation failed to detect the buffer overflow! {callNode}")
                 assert False
     """
     Join Lifetime
@@ -1301,7 +1301,7 @@ class AbstractExecution:
                     merged_alloc_state[obj_id] = addr
             in_edge_num += 1
         if in_edge_num == 0:
-            print(f"Error: No predecessors for block {block.getId()}")
+            log(f"Error: No predecessors for block {block.getId()}")
             if unanalysed_preds:
                 # Defer: a predecessor with no state may still be one every path into
                 # which was pruned
@@ -1635,7 +1635,7 @@ class AbstractExecution:
        - Process its WTO components to analyze its control flow.
     """
     def analyse(self):
-        print("Entering Debugging")
+        log("Entering Debugging")
         self.initWto()
         self.handleGlobalNode()
         # Process the main function if it exists
@@ -1688,7 +1688,7 @@ class AbstractExecution:
                     elif lifetime == Lifetime.MAY_FREED:
                         self.recordGap(f"Object {obj_id} may be leaked (MAY_FREED at exit)")
             else:
-                print("Warning: Could not locate the exit node for the main function.")
+                log("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
         if self.results["incomplete"]:
