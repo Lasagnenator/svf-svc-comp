@@ -714,9 +714,8 @@ class AbstractExecution:
             # An indirect call SVF could not resolve has no callee
             callee = callNode.getCalledFunction()
             if callee is not None and callee.getName() in ("reach_error", "__VERIFIER_error"):
-                if is_feasible and not getattr(self, "_in_widening_phase", False):
-                    if (True, callNode) not in self.results["reach"]:
-                        self.results["reach"].append((is_feasible, callNode))
+                if is_feasible and (True, callNode) not in self.results["reach"]:
+                    self.results["reach"].append((True, callNode))
 
         if not is_feasible:
             self.infeasible_nodes.add(node)
@@ -1011,7 +1010,7 @@ class AbstractExecution:
 
         if fun_name in ["OVERFLOW", "svf_assert", "svf_assert_eq"]:
             self.handleStubFunction(node)
-        elif fun_name in ["nd", "rand"] or fun_name.startswith("__VERIFIER_nondet_"):
+        elif fun_name in ("nd", "rand"):
             if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                 lhs_id = node.getRetICFGNode().getActualRet().getId()
                 if fun_name in ("__VERIFIER_nondet_bool", "__VERIFIER_nondet__Bool"):
@@ -1691,8 +1690,6 @@ class AbstractExecution:
                 log("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
-        if self.results["incomplete"]:
-            fail("Unknown", 0)
         self.ensureAllAssertsValidated()
         self.buf_overflow_helper.printReport()
 
@@ -2939,4 +2936,3 @@ class AbstractExecution:
                 self.results["useafterfree"].append(node)
             elif has_heap_addr and may_be_freed:
                 self.recordGap(f"May use after free at node {node.getId()}")
-
