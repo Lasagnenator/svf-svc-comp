@@ -17,6 +17,7 @@ from unittest import mock
 
 import generate_witness
 import invariants
+import violations
 import yaml
 
 from tests import tester
@@ -185,6 +186,189 @@ class WitnessExportTests(unittest.TestCase):
             self.assertEqual(len(entry['content']), 1)
             location = entry['content'][0]['invariant']['location']
             self.assertEqual(location, {'file_name': str(source), 'line': 1, 'column': 18, 'function': 'main'})
+
+    def test_violation_witness_renders_segments_and_shares_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { return 0; }\n')
+            violation, correctness = Path(directory) / 'violation.yml', Path(directory) / 'correctness.yml'
+            name = str(source)
+            segments = [
+                [{'type': 'branching', 'action': 'avoid', 'constraint': True, 'file_name': name, 'line': 2},
+                 {'type': 'branching', 'constraint': False, 'file_name': name, 'line': 3, 'column': 3}],
+                [{'type': 'assumption', 'constraint': 'v == 0', 'file_name': name, 'line': 4,
+                  'column': 3, 'function': 'main'}],
+                [{'type': 'target', 'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}],
+            ]
+            generate_witness.write_violation_witness(
+                segments, [name], 'G ! call(reach_error())', str(violation), data_model='ILP32')
+            generate_witness.write_witness([], [name], 'G ! call(reach_error())', str(correctness))
+            entry, = yaml.safe_load(violation.read_text())
+            other, = yaml.safe_load(correctness.read_text())
+
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['metadata']['format_version'], '2.0')
+        self.assertEqual(entry['metadata']['task']['data_model'], 'ILP32')
+        self.assertEqual(list(entry['metadata']), list(other['metadata']))
+        self.assertEqual(entry['content'], [
+            {'segment': [
+                {'waypoint': {'type': 'branching', 'action': 'avoid', 'constraint': {'value': 'true'},
+                              'location': {'file_name': name, 'line': 2}}},
+                {'waypoint': {'type': 'branching', 'action': 'follow', 'constraint': {'value': 'false'},
+                              'location': {'file_name': name, 'line': 3, 'column': 3}}}]},
+            {'segment': [
+                {'waypoint': {'type': 'assumption', 'action': 'follow',
+                              'constraint': {'value': 'v == 0', 'format': 'c_expression'},
+                              'location': {'file_name': name, 'line': 4, 'column': 3, 'function': 'main'}}}]},
+            {'segment': [
+                {'waypoint': {'type': 'target', 'action': 'follow',
+                              'location': {'file_name': name, 'line': 5, 'column': 5, 'function': 'main'}}}]},
+        ])
+
+    def test_memory_findings_map_to_the_violated_subproperty(self):
+        self.assertEqual(violations.memory_violation({'useafterfree': [1]}), ('useafterfree', 'valid-deref'))
+        self.assertEqual(violations.memory_violation({'bufferoverflow': [1]}), ('bufferoverflow', 'valid-deref'))
+        self.assertEqual(violations.memory_violation({'memoryleak': [7], 'doublefree': [1]}),
+                         ('doublefree', 'valid-free'))
+        self.assertEqual(violations.memory_violation({'badfree': [1]}), ('badfree', 'valid-free'))
+        self.assertEqual(violations.memory_violation({'memoryleak': [7]}), ('memoryleak', 'valid-memtrack'))
+        self.assertIsNone(violations.memory_violation({'bufferoverflow': [], 'reach': [(True, None)]}))
+
+        prp = (ROOT / 'tests' / 'valid-memsafety.prp').read_text()
+        self.assertEqual(violations.specification_for(prp, 'valid-deref'),
+                         'CHECK( init(main()), LTL(G valid-deref) )')
+        self.assertEqual(violations.specification_for(prp, 'valid-memtrack'),
+                         'CHECK( init(main()), LTL(G valid-memtrack) )')
+        # A property file without the subproperty is kept whole, e.g. valid-memcleanup.prp.
+        self.assertEqual(violations.specification_for(prp, 'valid-memcleanup'), prp.strip())
+
+    def test_leaks_target_the_statement_before_main_exits(self):
+        def node(location, function='main'):
+            site = mock.Mock()
+            site.getSourceLoc.return_value = location
+            site.getFun.return_value.getName.return_value = function
+            return site
+
+        exit_node = node('function ret: { "ln": 2, "file": "tmp.c" }')
+        exit_node.getInEdges.return_value = [SimpleNamespace(getSrcNode=lambda: node('{"ln": 9, "cl": 3}'))]
+        self.assertEqual(violations.memory_segments([4, 5], exit_node, 'program.c'),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 9, 'column': 3,
+                            'function': 'main'}]])
+        deref = node('{"ln": 6, "cl": 5}')
+        self.assertEqual(violations.memory_segments([deref], exit_node, 'program.c')[0][0]['line'], 6)
+        self.assertIsNone(violations.memory_segments([4], None, 'program.c'))
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_use_after_free_writes_a_valid_deref_violation_witness(self):
+        program = (
+            '#include <stdlib.h>\n'
+            'int main() {\n'
+            '  int *p = malloc(sizeof(int));\n'
+            '  free(p);\n'
+            '  *p = 1;\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'),
+                 '--prop', str(ROOT / 'tests' / 'valid-memsafety.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            # A use after free is an invalid dereference, not an invalid free.
+            self.assertIn('MEMORY Incorrect(valid-deref)', output, output[-2000:])
+            entry, = yaml.safe_load(witness.read_text())
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['metadata']['task']['specification'], 'CHECK( init(main()), LTL(G valid-deref) )')
+        target, = entry['content'][0]['segment']
+        self.assertEqual((target['waypoint']['type'], target['waypoint']['location']['line']), ('target', 5))
+
+    def test_reach_error_target_prefers_cfl_reachable_then_earliest_site(self):
+        def site(node_id, location, function='main'):
+            node = mock.Mock()
+            node.getId.return_value = node_id
+            node.getSourceLoc.return_value = location
+            node.getFun.return_value.getName.return_value = function
+            return node
+
+        early = site(1, '{"ln": 8, "cl": 5, "fl": "tmp.c"}')
+        late = site(2, '{"ln": 20, "cl": 7, "fl": "tmp.c"}', 'check')
+        results = [(True, late), (True, early), (False, site(3, '{"ln": 2, "cl": 3}')),
+                   (True, site(4, '{"ln": 1}')), (True, None), (True, site(5, '{"ln": 99, "cl": 1}'))]
+        self.assertEqual(violations.reach_error_segments(results, set(), 'program.c', max_line=50),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 8, 'column': 5,
+                            'function': 'main'}]])
+        self.assertEqual(violations.reach_error_segments(results, {2}, 'program.c', max_line=50),
+                         [[{'type': 'target', 'file_name': 'program.c', 'line': 20, 'column': 7,
+                            'function': 'check'}]])
+        # Infeasible sites, sites without a column and appended code never become the target.
+        self.assertIsNone(violations.reach_error_segments(results[2:], set(), 'program.c', max_line=50))
+
+    @unittest.skipUnless(shutil.which('clang-21') and importlib.util.find_spec('pysvf'),
+                         'clang-21 and pysvf are needed to run the analysis')
+    def test_claimed_violation_writes_a_target_witness(self):
+        program = (
+            'extern void abort(void);\n'
+            'extern void __assert_fail(const char *, const char *, unsigned int, const char *);\n'
+            'void reach_error() { __assert_fail("0", "program.c", 3, "reach_error"); }\n'
+            'extern int __VERIFIER_nondet_int(void);\n'
+            'int main() {\n'
+            '  int x = __VERIFIER_nondet_int();\n'
+            '  if (x == 5) {\n'
+            '    reach_error();\n'
+            '  }\n'
+            '  return 0;\n'
+            '}\n')
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            witness = Path(directory) / 'witness.yml'
+            source.write_text(program)
+            process = subprocess.run(
+                [sys.executable, str(ROOT / 'svf_run.py'), '--claim-violations',
+                 '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
+                 '--witness', str(witness), str(source)],
+                capture_output=True, text=True, timeout=300)
+            output = process.stdout + process.stderr
+            self.assertIn('REACH Incorrect', output, output[-2000:])
+            entry, = yaml.safe_load(witness.read_text())
+        self.assertEqual(entry['entry_type'], 'violation_sequence')
+        self.assertEqual(entry['content'], [{'segment': [{'waypoint': {
+            'type': 'target', 'action': 'follow',
+            'location': {'file_name': str(source), 'line': 8, 'column': 5, 'function': 'main'}}}]}])
+
+    def test_malformed_violation_witness_raises_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'program.c'
+            source.write_text('int main(void) { return 0; }\n')
+            witness = Path(directory) / 'witness.yml'
+            name = str(source)
+            target = {'type': 'target', 'file_name': name, 'line': 1}
+            step = {'type': 'assumption', 'constraint': 'x > 0', 'file_name': name, 'line': 1}
+            malformed = {
+                'no segments': [],
+                'empty segment': [[], [target]],
+                'last segment is not the target': [[step]],
+                'target before the last segment': [[target], [target]],
+                'follow before the end of a segment': [[step, target]],
+                'segment ends with avoid': [[step | {'action': 'avoid'}], [target]],
+                'target with a constraint': [[target | {'constraint': 'x > 0'}]],
+                'assumption without a constraint': [[step | {'constraint': None}], [target]],
+                'branching on a string': [[{'type': 'branching', 'constraint': 'yes',
+                                            'file_name': name, 'line': 1}], [target]],
+                'line below 1': [[target | {'line': 0}]],
+                'file that is not an input': [[target | {'file_name': 'other.c'}]],
+                'unknown type': [[step | {'type': 'loop'}], [target]],
+            }
+            for case, segments in malformed.items():
+                with self.subTest(case):
+                    with self.assertRaises(ValueError):
+                        generate_witness.write_violation_witness(
+                            segments, [name], 'G ! call(reach_error())', str(witness))
+                    self.assertFalse(witness.exists())
 
     def test_wrapper_reports_missing_columns_without_starting_cpachecker(self):
         with tempfile.TemporaryDirectory() as directory:
