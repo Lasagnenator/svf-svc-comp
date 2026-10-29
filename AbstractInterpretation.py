@@ -3,6 +3,7 @@ from abc import abstractmethod
 from pysvf import ICFG, ICFGNode
 from typing import List, Dict, Set, Optional
 import pysvf
+import re
 import faulthandler
 faulthandler.enable()
 from util import *
@@ -470,10 +471,19 @@ class AbstractExecution:
         #this is used to map allocated memory to its state, ALLOCATED, and FREED
         self.node_to_alloc_state = {}
 
-        # Lifetime abstract state before/after each ICFG node
-        # node -> {heap_obj_id: Lifetime}
+        # Lifetime abstract state before/after each ICFG node.
+        # node -> {base_obj_id: Lifetime}. This refines SVF's native
+        # freed-address set, which becomes a coarse may-be-dead set after joins.
         self.pre_lifetime_trace = {}
         self.post_lifetime_trace = {}
+
+        # Stack objects owned by each function, loop
+        # SVF exposes the ownership, but
+        # the Python analysis must expire those objects at function exit.
+        self.function_to_stack_obj_ids = {}
+        self.loop_stack_objects = {}
+        self.scope_exit_objects = {}
+
 
         # Used for tracking offsets for pointers
         # This is because the current SVF architecture collapsed the array 
@@ -551,6 +561,116 @@ class AbstractExecution:
     """
     def getVirtualMemAddress(self, idx: int) -> int:
         return self.addressMask + idx
+
+    def addNativeFreedObject(self, abstract_state, base_obj):
+        """Add an object's base address to SVF's coarse may-be-dead set."""
+        if base_obj is None:
+            return
+        abstract_state.addToFreedAddrs(
+            self.getVirtualMemAddress(base_obj.getId())
+        )
+
+    def nativeObjectMayBeDead(self, abstract_state, addr, base_obj) -> bool:
+        """Query both an exact address and its base in SVF's native set."""
+        if abstract_state.isFreedMem(addr):
+            return True
+        return abstract_state.isFreedMem(
+            self.getVirtualMemAddress(base_obj.getId())
+        )
+
+    def getBaseObjectFromAddress(self, abstract_state, addr):
+        """Resolve a base object, including addresses already marked freed.
+
+        SVF may map a freed virtual address to a sentinel ID. The virtual
+        address still encodes the original object ID in its low bits.
+        """
+        obj_id = abstract_state.getIDFromAddr(addr)
+        base_obj = self.svfir.getBaseObject(obj_id)
+        if base_obj is not None and (base_obj.isHeap() or base_obj.isStack()):
+            return base_obj
+
+        encoded_obj_id = int(addr) & self.flippedAddressMask
+        encoded_base = self.svfir.getBaseObject(encoded_obj_id)
+        if encoded_base is not None:
+            return encoded_base
+        return base_obj
+
+    def expireStackObjectsAtFunctionExit(self, exit_node):
+        """End the lifetime of stack objects owned by the exiting function."""
+        function = exit_node.getFun()
+        abstract_state = self.post_abs_trace[exit_node]
+        lifetime_state = self.post_lifetime_trace[exit_node]
+
+        for obj_id in self.function_to_stack_obj_ids.get(function, set()):
+            base_obj = self.svfir.getBaseObject(obj_id)
+            if base_obj is None:
+                continue
+            lifetime_state[obj_id] = Lifetime.FREED
+            self.addNativeFreedObject(abstract_state, base_obj)
+
+    @staticmethod
+    def getSourceLine(node):
+        """Return an ICFG node's source line, or None if it is unavailable."""
+        if node is None:
+            return None
+
+        match = re.search(r'"ln"\s*:\s*(\d+)', str(node.getSourceLoc()))
+        return int(match.group(1)) if match else None
+
+    def collectCycleNodes(self, cycle):
+        """Collect the ICFG nodes in a WTO cycle, including nested cycles."""
+        nodes = {cycle.head.node}
+
+        for component in cycle.components:
+            if isinstance(component, ICFGWTONode):
+                nodes.add(component.node)
+            elif isinstance(component, ICFGWTOCycle):
+                nodes.update(self.collectCycleNodes(component))
+
+        return nodes
+
+    def registerLoopStackObjects(self, cycle):
+        """Associate loop-local stack objects with edges leaving the loop.
+
+        LLVM commonly hoists alloca instructions to the function entry, so the
+        object's declaration source line is compared with the WTO loop's source
+        range instead of checking where the AddrStmt appears in the ICFG.
+        """
+        cycle_nodes = self.collectCycleNodes(cycle)
+        loop_lines = {
+            line for line in (
+                self.getSourceLine(node) for node in cycle_nodes
+            ) if line is not None
+        }
+        if not loop_lines:
+            return
+
+        first_line = min(loop_lines)
+        last_line = max(loop_lines)
+        function = cycle.head.node.getFun()
+        loop_objects = set()
+
+        for obj_id in self.function_to_stack_obj_ids.get(function, set()):
+            base_obj = self.svfir.getBaseObject(obj_id)
+            if base_obj is None or not base_obj.isStack():
+                continue
+
+            declaration_line = self.getSourceLine(base_obj.getICFGNode())
+            if (
+                declaration_line is not None
+                and first_line <= declaration_line <= last_line
+            ):
+                loop_objects.add(obj_id)
+
+        self.loop_stack_objects[cycle] = loop_objects
+
+        for source in cycle_nodes:
+            for edge in source.getOutEdges():
+                destination = edge.getDstNode()
+                if destination not in cycle_nodes:
+                    self.scope_exit_objects.setdefault(
+                        (source, destination), set()
+                    ).update(loop_objects)
     
     def joinPtrOffsetMaps(self, dst: Dict[int, pysvf.AbstractValue], src: Dict[int, pysvf.AbstractValue]):
         """ Safely join dictionary-based offset traces """
@@ -748,6 +868,11 @@ class AbstractExecution:
 
         for stmt in node.getSVFStmts():
             self.updateAbsState(stmt)
+
+        # Preserve returned pointer values, but expire storage owned by the
+        # callee before its exit state flows back to the caller.
+        if isinstance(node, pysvf.FunExitICFGNode):
+            self.expireStackObjectsAtFunctionExit(node)
             
         # Save the completed post-state into the C++ manager.
         self.ae_manager.updateAbsState(
@@ -1009,7 +1134,7 @@ class AbstractExecution:
 
         if fun_name in ["OVERFLOW", "svf_assert", "svf_assert_eq"]:
             self.handleStubFunction(node)
-        elif fun_name in ("nd", "rand"):
+        elif fun_name in ["nd", "rand"] or fun_name.startswith("__VERIFIER_nondet_"):
             if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                 lhs_id = node.getRetICFGNode().getActualRet().getId()
                 if fun_name in ("__VERIFIER_nondet_bool", "__VERIFIER_nondet__Bool"):
@@ -1247,14 +1372,21 @@ class AbstractExecution:
 
             if src in self.post_abs_trace:
                 src_alloc = self.node_to_alloc_state.get(src, {})
-                src_lifetime = self.post_lifetime_trace.get(src, {})
+                src_lifetime = self.post_lifetime_trace.get(src, {}).copy()
                 src_alloc_count = self.post_alloc_count_trace.get(src, {})
                 src_ptr_offsets = self.post_ptr_offset_trace.get(src, {})
+
+                # Apply lexical expiration to this edge only. Marking the
+                # source node itself would also poison the loop back-edge.
+                src_state = self.post_abs_trace[src].clone()
+                for obj_id in self.scope_exit_objects.get((src, block), set()):
+                    if obj_id in src_lifetime:
+                        src_lifetime[obj_id] = Lifetime.MAY_FREED
 
                 edge_feasible = False
                 if isinstance(edge, pysvf.IntraCFGEdge):
                     if edge.getCondition():
-                        tmp_es = self.post_abs_trace[src].clone()
+                        tmp_es = src_state.clone()
                         tmp_offsets = {k: v.clone() for k, v in src_ptr_offsets.items()}
                         old_post_offsets = self.post_ptr_offset_trace.get(src)
                         self.post_ptr_offset_trace[src] = tmp_offsets
@@ -1268,12 +1400,12 @@ class AbstractExecution:
                         if old_post_offsets is not None:
                             self.post_ptr_offset_trace[src] = old_post_offsets
                     else:
-                        abstract_state.joinWith(self.post_abs_trace[src])
+                        abstract_state.joinWith(src_state)
                         self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                         in_edge_num += 1
                         edge_feasible = True
                 else:
-                    abstract_state.joinWith(self.post_abs_trace[src])
+                    abstract_state.joinWith(src_state)
                     self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                     in_edge_num += 1
                     edge_feasible = True
@@ -1689,8 +1821,6 @@ class AbstractExecution:
                 log("Warning: Could not locate the exit node for the main function.")
         else:
             assert False, "Main function not found"
-        if self.results["incomplete"]:
-            fail("Unknown", 0)
         self.ensureAllAssertsValidated()
         self.buf_overflow_helper.printReport()
 
@@ -1796,6 +1926,17 @@ class AbstractExecution:
         mem_object = self.initObjVar(addr.getRHSVar().asObjVar())
         abstract_state[addr.getRHSVarID()] = AbstractValue(mem_object)
         abstract_state[addr.getLHSVarID()] = abstract_state[addr.getRHSVarID()]
+
+        # Register stack storage in the precise lifetime map. The native SVF
+        # state only records addresses after they may have died.
+        base_obj = self.svfir.getBaseObject(addr.getRHSVarID())
+        if base_obj is not None and base_obj.isStack():
+            obj_id = base_obj.getId()
+            owner = base_obj.getFunction()
+            if owner is None:
+                owner = node.getFun()
+            self.function_to_stack_obj_ids.setdefault(owner, set()).add(obj_id)
+            self.post_lifetime_trace[node][obj_id] = Lifetime.ALLOCATED
         
         ## Tracking pointers offset
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
@@ -2619,6 +2760,7 @@ class AbstractExecution:
                             old_base = self.svfir.getBaseObject(old_obj_id)
                             if old_base is not None and old_base.isHeap():
                                 self.post_lifetime_trace[extCallNode][old_base.getId()] = Lifetime.FREED
+                                self.addNativeFreedObject(abstract_state, old_base)
 
             if extCallNode.getRetICFGNode() is None or extCallNode.getRetICFGNode().getActualRet() is None:
                 self.resumeAfterUnanalysedCall(extCallNode)
@@ -2735,6 +2877,11 @@ class AbstractExecution:
                         # Weak update
                         lifetime_state[base_id] = Lifetime.MAY_FREED
 
+                    # SVF's native set is deliberately coarse: after a join it
+                    # means possibly freed. The dictionary above retains the
+                    # definite-versus-maybe distinction.
+                    self.addNativeFreedObject(abstract_state, base_obj)
+
             self.resumeAfterUnanalysedCall(extCallNode)
 
 
@@ -2751,6 +2898,7 @@ class AbstractExecution:
     :type cycle: ICFGWTOCycle
     """
     def handleICFGCycle(self, cycle: ICFGWTOCycle):
+        self.registerLoopStackObjects(cycle)
         head = cycle.head.node
         increasing = True
         iteration = 0
@@ -2905,35 +3053,53 @@ class AbstractExecution:
             elif may_be_null:
                 self.recordGap(f"May null pointer dereference at node {node.getId()}")
 
-            # MUST-Alias Check: Are ALL possible addresses FREED?
-            is_definitely_freed = True
-            may_be_freed = False
-            has_heap_addr = False
+            # Lifetime check for both heap and stack objects. 
+            # The dictionary is a three-state domain; 
+            # SVF's native freed set is a coarse may-be-dead signal that travels 
+            # with AbstractState.
+            is_definitely_dead = True
+            may_be_dead = False
+            has_lifetime_addr = False
 
             for addr in addrs:
                 if addr == 0 or abstract_state.isNullMem(addr):
-                    is_definitely_freed = False
+                    is_definitely_dead = False
                     continue
 
-                obj_id = abstract_state.getIDFromAddr(addr)
-                base_obj = self.svfir.getBaseObject(obj_id)
+                base_obj = self.getBaseObjectFromAddress(abstract_state, addr)
 
-                if base_obj is None or not base_obj.isHeap():
-                    is_definitely_freed = False
+                if base_obj is None:
+                    is_definitely_dead = False
                     continue
 
-                has_heap_addr = True
+                if not base_obj.isHeap() and not base_obj.isStack():
+                    is_definitely_dead = False
+                    continue
+
+                # Get the current object lifetime
+                # his can check if an object (is it is on Stack) out of scope or not
+                # Out of scope could refer to out of a functions
+                has_lifetime_addr = True
 
                 lifetime = lifetime_state.get(base_obj.getId(), Lifetime.ALLOCATED)
+                native_may_be_dead = self.nativeObjectMayBeDead(
+                    abstract_state, addr, base_obj
+                )
 
                 if lifetime != Lifetime.FREED:
-                    is_definitely_freed = False
-                if lifetime in (Lifetime.FREED, Lifetime.MAY_FREED):
-                    may_be_freed = True
+                    is_definitely_dead = False
+                if (
+                    lifetime in (Lifetime.FREED, Lifetime.MAY_FREED)
+                    or native_may_be_dead
+                ):
+                    may_be_dead = True
 
-            if has_heap_addr and is_definitely_freed:
-                msg = f"Use After Free detected. Must access freed addresses {addrs}."
-                self.buf_overflow_helper.reportUseAfterFree(node, msg)
-                self.results["useafterfree"].append(node)
-            elif has_heap_addr and may_be_freed:
-                self.recordGap(f"May use after free at node {node.getId()}")
+            if has_lifetime_addr and is_definitely_dead:
+                msg = f"Invalid dereference of expired/freed addresses {addrs}."
+                if node not in self.results["useafterfree"]:
+                    self.buf_overflow_helper.reportUseAfterFree(node, msg)
+                    self.results["useafterfree"].append(node)
+            elif has_lifetime_addr and may_be_dead:
+                self.recordGap(
+                    f"May dereference expired/freed storage at node {node.getId()}"
+                )

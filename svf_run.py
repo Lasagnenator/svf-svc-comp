@@ -184,7 +184,11 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             print("MEMORY Incorrect(valid-deref)")
             correctness = "Incorrect"
             
-        elif len(ae.results.get("useafterfree", [])) > 0 or len(ae.results.get("doublefree", [])) > 0:
+        elif len(ae.results.get("useafterfree", [])) > 0:
+            print("MEMORY Incorrect(valid-deref)")
+            correctness = "Incorrect"
+
+        elif len(ae.results.get("doublefree", [])) > 0:
             print("MEMORY Incorrect(valid-free)")
             correctness = "Incorrect"
             
@@ -194,6 +198,12 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         elif len(ae.results.get("badfree", [])) > 0:
             print("MEMORY Incorrect(valid-free)")
             correctness = "Incorrect"
+
+        elif len(ae.results.get("incomplete", [])) > 0:
+            # A coverage gap means the analysis did not prove memory safety.
+            # Definite violations above still take precedence over gaps.
+            print("Unknown")
+            correctness = "Unknown"
             
         else:
             print("MEMORY Correct")
