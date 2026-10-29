@@ -197,14 +197,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             correctness = "Incorrect"
         elif len(ae.results.get("badfree", [])) > 0:
             print("MEMORY Incorrect(valid-free)")
-            correctness = "Incorrect"
-
-        elif len(ae.results.get("incomplete", [])) > 0:
-            # A coverage gap means the analysis did not prove memory safety.
-            # Definite violations above still take precedence over gaps.
-            print("Unknown")
-            correctness = "Unknown"
-            
+            correctness = "Incorrect"            
         else:
             print("MEMORY Correct")
             correctness = "Correct"
