@@ -14,6 +14,7 @@ runtime_files=(
     nondet.py
     svf_run.py
     util.py
+    violations.py
     LICENSE.TXT
     README.md
     smoketest.sh
