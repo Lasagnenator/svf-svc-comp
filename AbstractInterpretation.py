@@ -720,7 +720,7 @@ class AbstractExecution:
             # An indirect call SVF could not resolve has no callee
             callee = callNode.getCalledFunction()
             if callee is not None and callee.getName() in ("reach_error", "__VERIFIER_error"):
-                if is_feasible and not getattr(self, "_in_widening_phase", False):
+                if is_feasible:
                     if (True, callNode) not in self.results["reach"]:
                         self.results["reach"].append((is_feasible, callNode))
 
@@ -869,6 +869,8 @@ class AbstractExecution:
         for block in self.orphan_nodes:
             if block in self.post_abs_trace:
                 continue  # a later iteration gave it a state after all
+            if isinstance(block, pysvf.RetICFGNode) and block.getCallICFGNode() in self.unreachable_nodes:
+                continue
             pending = [edge.getSrcNode() for edge in block.getInEdges()
                        if edge.getSrcNode() not in self.post_abs_trace
                        and edge.getSrcNode() not in self.unreachable_nodes]
@@ -933,6 +935,24 @@ class AbstractExecution:
         self.skipped_alloc_states[ret] = (
             self.node_to_alloc_state.get(node, {}).copy()
         )
+
+    def restageSkippedCall(self, node: pysvf.ICFGNode):
+        """Refresh a skipped call's staged ret state after widening/narrowing at a loop head,
+        so the loop body sees the widened state instead of the first iteration's.
+        """
+        if not isinstance(node, pysvf.CallICFGNode):
+            return
+        ret = node.getRetICFGNode()
+        if ret is None or ret not in self.skipped_states:
+            return
+        actual_ret = ret.getActualRet()
+        staged = self.skipped_states[ret]
+        ret_val = None
+        if actual_ret is not None and staged.inVarToValTable(actual_ret.getId()):
+            ret_val = staged[actual_ret.getId()].clone()
+        self.resumeAfterUnanalysedCall(node)
+        if ret_val is not None:
+            self.skipped_states[ret][actual_ret.getId()] = ret_val
 
     def cmpVarBehind(self, var, depth: int = 4):
         """Walk back through value-preserving copies to the comparison that produced `var`.
@@ -1038,7 +1058,7 @@ class AbstractExecution:
                 elif fun_name in ("__VERIFIER_nondet_short",):
                     self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue(-32768, 32767))
                 elif fun_name in ("__VERIFIER_nondet_uint", "__VERIFIER_nondet_ulong", "__VERIFIER_nondet_size_t"):
-                    self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue(0, pysvf.Options.max_field_limit()))
+                    self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
                 else:
                     self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
             self.resumeAfterUnanalysedCall(node)
@@ -1422,8 +1442,6 @@ class AbstractExecution:
                         if off0 and off1 and off0.isInterval() and off1.isInterval():
                             if off0.getInterval().is_numeral() and off0.getInterval().equals(off1.getInterval()):
                                 return False
-                    else:
-                        return False
 
             # Pointer Offset Narrowing for Pointer Comparisons (e.g. ptr1 < ptr2) ---
             # skip unless both point to the same single object
@@ -1658,10 +1676,6 @@ class AbstractExecution:
                     if (n.getICFGNode() if isinstance(n, pysvf.SVFStmt) else n) in self.post_abs_trace
                     and (n.getICFGNode() if isinstance(n, pysvf.SVFStmt) else n) not in self.infeasible_nodes
                 ]
-            self.results["reach"] = [
-                (feas, n) for (feas, n) in self.results["reach"]
-                if feas and n in self.post_abs_trace and n not in self.infeasible_nodes
-            ]
 
             #Memory Leak Detection at Program Exit
             main_exit = None
@@ -1988,9 +2002,9 @@ class AbstractExecution:
         rhs_id = ret.getRHSVarID()
         lhs_id = ret.getLHSVarID()
         
-        # Propagate Return Value
-        val = abstract_state.getVar(rhs_id)
-        abstract_state[lhs_id] = val.clone()
+        # Propagate Return Value. An unanalysed callee (e.g. a nondet stub) has no return value.
+        if abstract_state.inVarToValTable(rhs_id) or abstract_state.inVarToAddrsTable(rhs_id):
+            abstract_state[lhs_id] = abstract_state.getVar(rhs_id).clone()
         
         # Propagate Return Pointer Offsets
         if rhs_id in ptr_offsets:
@@ -2327,7 +2341,7 @@ class AbstractExecution:
         if copy.isZext() and rhs_val.isInterval():
             iv = rhs_val.getInterval()
             if not iv.isBottom() and iv.lb() < pysvf.BoundedInt(0):
-                abstract_state[lhs] = AbstractValue(IntervalValue(0, pysvf.Options.max_field_limit()))
+                abstract_state[lhs] = AbstractValue(IntervalValue.top())
             else:
                 abstract_state[lhs] = rhs_val.clone()
         elif not (copy.isZext() or copy.isSext() or copy.isValueCopy()) and rhs_val.isInterval():
@@ -2778,6 +2792,7 @@ class AbstractExecution:
                             for vid, cur_val in cur_iteration_ptr_offsets.items()
                         )
 
+                    self.restageSkippedCall(head)
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
 
@@ -2795,6 +2810,7 @@ class AbstractExecution:
                         self.post_ptr_offset_trace[head][k] = v.clone()
                     ptr_stable = True
 
+                    self.restageSkippedCall(head)
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
 
