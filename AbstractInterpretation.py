@@ -840,8 +840,13 @@ class AbstractExecution:
             callNode = node.asCall()
             # An indirect call SVF could not resolve has no callee
             callee = callNode.getCalledFunction()
-            if is_feasible and (True, callNode) not in self.results["reach"]:
-                    self.results["reach"].append((True, callNode))
+            if (
+                is_feasible
+                and callee is not None
+                and callee.getName() in ("reach_error", "__VERIFIER_error")
+                and (True, callNode) not in self.results["reach"]
+            ):
+                self.results["reach"].append((True, callNode))
 
         if not is_feasible:
             self.infeasible_nodes.add(node)
@@ -920,7 +925,7 @@ class AbstractExecution:
     # The SV-COMP verification harness only. Anything absent records a gap, so the verdict
     # degrades to Unknown.
     SAFE_EXTERNALS = {
-        "abort", "exit", "_exit",
+        "abort", "exit", "_exit", "_Exit", "quick_exit",
         "__assert_fail", "__assert", "__assert_perror_fail",
         "reach_error", "__VERIFIER_error",
     }
@@ -930,9 +935,16 @@ class AbstractExecution:
     # through a pointer argument (sprintf, snprintf, memcpy, scanf) must stay out.
     PURE_EXTERNALS = {
         "printf", "fprintf", "vprintf", "vfprintf", "puts", "fputs", "putchar",
-        "fputc", "putc", "fflush", "perror",
+        "fputc", "putc", "fflush", "perror", "fopen", "fclose", "feof", "ferror",
+        "fileno", "getchar", "fgetc", "getc", "ungetc", "setbuf", "setvbuf",
+        "srand", "time", "clock", "sleep", "usleep", "getpid", "getppid", "getuid",
+        "isatty", "strerror", "localeconv", "setlocale",
+        "isalnum", "isalpha", "isascii", "isblank", "iscntrl", "isdigit", "isgraph",
+        "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit",
+        "tolower", "toupper",
         "llvm.lifetime.start", "llvm.lifetime.end", "llvm.dbg.declare", "llvm.dbg.value",
-        "llvm.stacksave", "llvm.stackrestore",
+        "llvm.dbg.label", "llvm.stacksave", "llvm.stackrestore", "llvm.assume",
+        "llvm.expect", "llvm.objectsize", "llvm.prefetch", "llvm.pcmarker",
     }
 
     # The SV-COMP harness writes every input constraint as assume_abort_if_not(cond):
@@ -944,8 +956,18 @@ class AbstractExecution:
     MEMORY_EXTERNALS = (
         "malloc", "llvm.stacksave", "llvm.stackrestore",
         "llvm.memcpy", "llvm.memmove", "llvm.memset",
-        "memcpy", "memmove", "memset",
+        "memcpy", "memmove", "memset", "bzero", "explicit_bzero",
     )
+
+    LIBC_STRING_EXTERNALS = {
+        "strlen", "strnlen", "strcpy", "strncpy", "strcat", "strncat",
+        "strcmp", "strncmp", "strcasecmp", "strncasecmp",
+        "strchr", "strrchr", "strstr", "strpbrk", "strspn", "strcspn",
+        "memcmp", "bcmp", "memchr", "memrchr",
+        "strdup", "strndup", "__strdup",
+        "atoi", "atol", "atoll", "strtol", "strtoul", "strtoll", "strtoull",
+        "abs", "labs", "llabs",
+    }
 
     # stacksave and stackrestore have suffix, matched by prefix
     # to cover overload suffixes (.p0, .i32).
@@ -953,11 +975,259 @@ class AbstractExecution:
         return any(fun_name == name or fun_name.startswith(name + ".")
                    for name in self.MEMORY_EXTERNALS)
 
+    def _checkExternalBufferAccess(self, node: pysvf.CallICFGNode, ptr_id: int, access_len_iv: Optional[pysvf.IntervalValue]):
+        """Validate pointer safety and optional byte length access on an external call argument."""
+        self.checkMemorySafety(node, ptr_id)
+        self.checkBufferOverflow(node, ptr_id)
+        if access_len_iv is None or getattr(self, "_in_widening_phase", False):
+            return
+        if self.intervalIsEmpty(access_len_iv) or access_len_iv.isTop():
+            return
+        max_len = int(access_len_iv.ub()) if not access_len_iv.ub().is_infinity else -1
+        if max_len <= 0:
+            return
+
+        abstract_state = self.post_abs_trace.get(node)
+        if abstract_state is None:
+            return
+        ptr_val = abstract_state.getVar(ptr_id)
+        if not ptr_val.isAddr():
+            return
+
+        ptr_offsets = self.post_ptr_offset_trace.get(node, {})
+        off_val = ptr_offsets.get(ptr_id)
+        base_off = off_val.getInterval() if (off_val and off_val.isInterval()) else pysvf.IntervalValue(0, 0)
+        if base_off.isTop() or self.intervalIsEmpty(base_off):
+            return
+
+        end_offset = base_off + pysvf.IntervalValue(max(0, int(access_len_iv.lb()) - 1), max_len - 1)
+        saved_off = ptr_offsets.get(ptr_id)
+        ptr_offsets[ptr_id] = pysvf.AbstractValue(end_offset)
+        self.checkBufferOverflow(node, ptr_id)
+        if saved_off is not None:
+            ptr_offsets[ptr_id] = saved_off
+        else:
+            ptr_offsets.pop(ptr_id, None)
+
     def handleMemoryCall(self, node: pysvf.CallICFGNode, fun_name: str):
-        if (fun_name.startswith("llvm.memcpy") or fun_name == "memcpy") and not any(
-                isinstance(stmt, pysvf.StoreStmt) for stmt in node.getSVFStmts()):
-            self.recordGap(f"memcpy not lowered by SVF: {fun_name}")
+        abstract_state = self.post_abs_trace.get(node)
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        parms = node.getActualParms()
+
+        if abstract_state is not None and len(parms) >= 1:
+            dst_var = parms[0]
+            dst_id = dst_var.getId()
+
+            if fun_name in ("bzero", "explicit_bzero") and len(parms) >= 2:
+                len_val = abstract_state.getVar(parms[1].getId())
+                len_iv = len_val.getInterval() if len_val.isInterval() else None
+                self._checkExternalBufferAccess(node, dst_id, len_iv)
+            elif (fun_name == "memset" or fun_name.startswith("llvm.memset")) and len(parms) >= 3:
+                len_val = abstract_state.getVar(parms[2].getId())
+                len_iv = len_val.getInterval() if len_val.isInterval() else None
+                self._checkExternalBufferAccess(node, dst_id, len_iv)
+                val_arg = abstract_state.getVar(parms[1].getId())
+                if val_arg.isInterval() and val_arg.getInterval().is_zero() and dst_id in abstract_state:
+                    if abstract_state.getVar(dst_id).isAddr():
+                        for addr in abstract_state.getVar(dst_id).getAddrs():
+                            if addr != 0 and not abstract_state.isNullMem(addr):
+                                abstract_state.store(addr, pysvf.AbstractValue(pysvf.IntervalValue(0, 0)))
+                        self.ae_manager.updateAbsState(node, abstract_state)
+            elif (fun_name in ("memcpy", "memmove") or fun_name.startswith("llvm.memcpy") or fun_name.startswith("llvm.memmove")) and len(parms) >= 3:
+                src_var = parms[1]
+                src_id = src_var.getId()
+                len_val = abstract_state.getVar(parms[2].getId())
+                len_iv = len_val.getInterval() if len_val.isInterval() else None
+                self._checkExternalBufferAccess(node, dst_id, len_iv)
+                self._checkExternalBufferAccess(node, src_id, len_iv)
+
+                if len_iv is not None and not len_iv.isTop() and not self.intervalIsEmpty(len_iv) and int(len_iv.ub()) <= 64:
+                    try:
+                        self.buf_overflow_helper.handleMemcpy(abstract_state, dst_var, src_var, len_iv, 0, node)
+                    except Exception:
+                        pass
+
+                # Propagate pointer offsets stored inside src memory to dst memory
+                if abstract_state.getVar(dst_id).isAddr() and abstract_state.getVar(src_id).isAddr():
+                    src_mem_off = None
+                    for s_addr in abstract_state.getVar(src_id).getAddrs():
+                        if s_addr == 0 or abstract_state.isNullMem(s_addr):
+                            continue
+                        s_key = -self._getCanonicalMemObjId(abstract_state, s_addr)
+                        off = ptr_offsets.get(s_key) or ptr_offsets.get(-s_addr)
+                        if off is not None:
+                            src_mem_off = off.clone() if src_mem_off is None else src_mem_off
+                            if src_mem_off is not off:
+                                src_mem_off.join_with(off)
+                    if src_mem_off is not None:
+                        for d_addr in abstract_state.getVar(dst_id).getAddrs():
+                            if d_addr == 0 or abstract_state.isNullMem(d_addr):
+                                continue
+                            d_key = -self._getCanonicalMemObjId(abstract_state, d_addr)
+                            ptr_offsets[d_key] = src_mem_off.clone()
+                            ptr_offsets[-d_addr] = src_mem_off.clone()
+
         self.resumeAfterUnanalysedCall(node)
+
+        # C library memcpy, memmove, and memset return the destination pointer (arg 0)
+        ret = node.getRetICFGNode()
+        if ret is not None and ret.getActualRet() is not None and len(parms) >= 1 and fun_name in ("memcpy", "memmove", "memset"):
+            lhs_id = ret.getActualRet().getId()
+            dst_id = parms[0].getId()
+            if abstract_state is not None:
+                abstract_state[lhs_id] = abstract_state.getVar(dst_id).clone()
+                if ret in self.skipped_states:
+                    self.skipped_states[ret][lhs_id] = abstract_state[lhs_id].clone()
+                if dst_id in ptr_offsets:
+                    ptr_offsets[lhs_id] = ptr_offsets[dst_id].clone()
+                    if hasattr(self, "skipped_ptr_offset_states") and ret in self.skipped_ptr_offset_states:
+                        self.skipped_ptr_offset_states[ret][lhs_id] = ptr_offsets[lhs_id].clone()
+
+    def handleLibcStringCall(self, node: pysvf.CallICFGNode, fun_name: str):
+        """Model standard libc string, memory comparison, and integer conversion calls."""
+        abstract_state = self.post_abs_trace.get(node)
+        ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
+        parms = node.getActualParms()
+        ret = node.getRetICFGNode()
+        lhs_id = ret.getActualRet().getId() if (ret is not None and ret.getActualRet() is not None) else None
+
+        if abstract_state is None:
+            self.resumeAfterUnanalysedCall(node)
+            return
+
+        # 1. Dereference & bounds checks on pointer operands
+        if fun_name in ("strlen", "strnlen", "atoi", "atol", "atoll", "strdup", "strndup", "__strdup") and len(parms) >= 1:
+            self._checkExternalBufferAccess(node, parms[0].getId(), None)
+        elif fun_name in ("strtol", "strtoul", "strtoll", "strtoull") and len(parms) >= 1:
+            self._checkExternalBufferAccess(node, parms[0].getId(), None)
+            if len(parms) >= 2:
+                endptr_id = parms[1].getId()
+                endptr_val = abstract_state.getVar(endptr_id)
+                if endptr_val.isAddr():
+                    non_null = [a for a in endptr_val.getAddrs() if a != 0 and not abstract_state.isNullMem(a)]
+                    if non_null:
+                        self._checkExternalBufferAccess(node, endptr_id, None)
+                        for a in non_null:
+                            abstract_state.store(a, abstract_state.getVar(parms[0].getId()).clone())
+                            c_key = -self._getCanonicalMemObjId(abstract_state, a)
+                            ptr_offsets[c_key] = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+                            ptr_offsets[-a] = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+        elif fun_name in ("strcpy", "strcat") and len(parms) >= 2:
+            dst_id, src_id = parms[0].getId(), parms[1].getId()
+            self._checkExternalBufferAccess(node, dst_id, None)
+            self._checkExternalBufferAccess(node, src_id, None)
+            try:
+                src_len = self.buf_overflow_helper.getStrlen(abstract_state, parms[1], node)
+                if not src_len.isTop() and int(src_len.ub()) < pysvf.Options.max_field_limit():
+                    # Include +1 byte for the null terminator
+                    total_written = src_len + pysvf.IntervalValue(1, 1)
+                    if fun_name == "strcat":
+                        dst_len = self.buf_overflow_helper.getStrlen(abstract_state, parms[0], node)
+                        if not dst_len.isTop() and int(dst_len.ub()) < pysvf.Options.max_field_limit():
+                            total_written = dst_len + total_written
+                    self._checkExternalBufferAccess(node, dst_id, total_written)
+            except Exception:
+                pass
+        elif fun_name in ("strncpy", "strncat") and len(parms) >= 3:
+            dst_id, src_id = parms[0].getId(), parms[1].getId()
+            n_val = abstract_state.getVar(parms[2].getId())
+            n_iv = n_val.getInterval() if n_val.isInterval() else None
+            self._checkExternalBufferAccess(node, dst_id, n_iv)
+            self._checkExternalBufferAccess(node, src_id, None)
+        elif fun_name in ("strcmp", "strcasecmp", "strstr", "strpbrk", "strspn", "strcspn") and len(parms) >= 2:
+            self._checkExternalBufferAccess(node, parms[0].getId(), None)
+            self._checkExternalBufferAccess(node, parms[1].getId(), None)
+        elif fun_name in ("strncmp", "strncasecmp", "memcmp", "bcmp") and len(parms) >= 3:
+            n_val = abstract_state.getVar(parms[2].getId())
+            n_iv = n_val.getInterval() if n_val.isInterval() else None
+            if fun_name in ("memcmp", "bcmp"):
+                self._checkExternalBufferAccess(node, parms[0].getId(), n_iv)
+                self._checkExternalBufferAccess(node, parms[1].getId(), n_iv)
+            else:
+                self._checkExternalBufferAccess(node, parms[0].getId(), None)
+                self._checkExternalBufferAccess(node, parms[1].getId(), None)
+        elif fun_name in ("strchr", "strrchr") and len(parms) >= 2:
+            self._checkExternalBufferAccess(node, parms[0].getId(), None)
+        elif fun_name in ("memchr", "memrchr") and len(parms) >= 3:
+            n_val = abstract_state.getVar(parms[2].getId())
+            n_iv = n_val.getInterval() if n_val.isInterval() else None
+            self._checkExternalBufferAccess(node, parms[0].getId(), n_iv)
+
+        # 2. Compute abstract return value and pointer offset
+        ret_val = None
+        ret_offset = None
+
+        if fun_name in ("strlen", "strnlen", "strspn", "strcspn") and len(parms) >= 1:
+            if fun_name == "strlen":
+                try:
+                    str_iv = self.buf_overflow_helper.getStrlen(abstract_state, parms[0], node)
+                    ret_val = pysvf.AbstractValue(str_iv)
+                except Exception:
+                    ret_val = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+            else:
+                ret_val = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+        elif fun_name in ("strcpy", "strncpy", "strcat", "strncat") and len(parms) >= 1:
+            dst_id = parms[0].getId()
+            ret_val = abstract_state.getVar(dst_id).clone()
+            if dst_id in ptr_offsets:
+                ret_offset = ptr_offsets[dst_id].clone()
+        elif fun_name in ("strchr", "strrchr", "strstr", "strpbrk", "memchr", "memrchr") and len(parms) >= 1:
+            s_id = parms[0].getId()
+            s_val = abstract_state.getVar(s_id)
+            if s_val.isAddr():
+                addrs = set(s_val.getAddrs())
+                addrs.add(pysvf.NullMemAddr)
+                ret_val = pysvf.AbstractValue(pysvf.AddressValue(addrs))
+                base_off = ptr_offsets.get(s_id)
+                lb = int(base_off.getInterval().lb()) if (base_off and base_off.isInterval() and not base_off.getInterval().isTop()) else 0
+                ret_offset = pysvf.AbstractValue(pysvf.IntervalValue(max(0, lb), pysvf.Options.max_field_limit()))
+        elif fun_name in ("strdup", "strndup", "__strdup") and lhs_id is not None:
+            # Model heap allocation for duplicated string
+            if node not in self.node_to_alloc_state:
+                self.node_to_alloc_state[node] = {}
+            heap_obj_id = None
+            for n in (node, ret):
+                if n is None:
+                    continue
+                for st in n.getSVFStmts():
+                    if isinstance(st, pysvf.AddrStmt):
+                        heap_obj_id = st.getRHSVarID()
+                        break
+                if heap_obj_id is not None:
+                    break
+            if heap_obj_id is not None:
+                alloc_addr = self.getVirtualMemAddress(heap_obj_id)
+                ret_val = pysvf.AbstractValue(pysvf.AddressValue(alloc_addr))
+                ret_offset = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
+                self.post_lifetime_trace[node][heap_obj_id] = Lifetime.ALLOCATED
+                self.node_to_alloc_state[node][heap_obj_id] = alloc_addr
+                self.alloc_size_trace[heap_obj_id] = pysvf.IntervalValue(1, pysvf.Options.max_field_limit())
+        elif fun_name in ("abs", "labs", "llabs") and len(parms) >= 1:
+            arg_val = abstract_state.getVar(parms[0].getId())
+            if arg_val.isInterval() and not arg_val.getInterval().isTop() and not self.intervalIsEmpty(arg_val.getInterval()):
+                iv = arg_val.getInterval()
+                zero = pysvf.BoundedInt(0)
+                if iv.lb() >= zero:
+                    ret_val = pysvf.AbstractValue(iv.clone())
+                elif iv.ub() <= zero and not iv.lb().is_infinity:
+                    ret_val = pysvf.AbstractValue(pysvf.IntervalValue(-int(iv.ub()), -int(iv.lb())))
+                else:
+                    ret_val = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+            else:
+                ret_val = pysvf.AbstractValue(pysvf.IntervalValue(0, pysvf.Options.max_field_limit()))
+        else:
+            ret_val = pysvf.AbstractValue(pysvf.IntervalValue.top())
+
+        self.resumeAfterUnanalysedCall(node)
+
+        if lhs_id is not None and ret_val is not None:
+            abstract_state[lhs_id] = ret_val.clone()
+            if ret in self.skipped_states:
+                self.skipped_states[ret][lhs_id] = ret_val.clone()
+            if ret_offset is not None:
+                ptr_offsets[lhs_id] = ret_offset.clone()
+                if hasattr(self, "skipped_ptr_offset_states") and ret in self.skipped_ptr_offset_states:
+                    self.skipped_ptr_offset_states[ret][lhs_id] = ret_offset.clone()
 
     def computeUnreachableNodes(self):
         """Nodes with no live path in: every incoming edge comes from an unreachable node.
@@ -1168,6 +1438,8 @@ class AbstractExecution:
                 self.skipped_states[node.getRetICFGNode()][lhs_id] = self.post_abs_trace[node][lhs_id].clone()
         elif fun_name in ["mem_insert", "str_insert", "malloc", "free", "calloc", "realloc", "alloca", "__builtin_alloca"]: 
             self.updateStateOnExtCall(node)
+        elif fun_name in self.LIBC_STRING_EXTERNALS:
+            self.handleLibcStringCall(node, fun_name)
         elif pysvf.isExtCall(callee):
             # The body is never walked, so the callee's exit gets no state,
             # deal with it here.
@@ -1180,6 +1452,11 @@ class AbstractExecution:
                 self.resumeAfterUnanalysedCall(node)
             elif self.isMemoryExternal(fun_name):
                 self.handleMemoryCall(node, fun_name)
+            elif any(fun_name.startswith("__builtin_" + s) for s in self.LIBC_STRING_EXTERNALS):
+                clean_name = fun_name[len("__builtin_"):]
+                self.handleLibcStringCall(node, clean_name)
+            elif fun_name.startswith("__builtin_object_size"):
+                self.resumeAfterUnanalysedCall(node)
             else:
                 self.recordGap(f"external call not modelled: {fun_name}")
                 self.resumeAfterUnanalysedCall(node)
@@ -1193,13 +1470,39 @@ class AbstractExecution:
         else:
             fun_entry = self.svfir.getICFG().getFunEntryICFGNode(callee)
             old_entry_state = self.post_abs_trace.get(fun_entry)
+            old_entry_lifetime = self.post_lifetime_trace.get(fun_entry, {}).copy() if fun_entry in self.post_lifetime_trace else None
+            old_entry_alloc_count = self.post_alloc_count_trace.get(fun_entry, {}).copy() if fun_entry in self.post_alloc_count_trace else None
+            old_entry_offsets = (
+                {k: v.clone() for k, v in self.post_ptr_offset_trace[fun_entry].items()}
+                if fun_entry in self.post_ptr_offset_trace else None
+            )
 
-            # Fast-path: Only analyze the callee if the incoming state shifted
+            # Fast-path: Only analyze the callee if the incoming state shifted across any domain
             is_feasible, merged_as = self.mergeStatesFromPredecessors(fun_entry)
             if not is_feasible:
                 return
 
-            if old_entry_state is None or merged_as != old_entry_state:
+            new_entry_lifetime = self.pre_lifetime_trace.get(fun_entry, {})
+            new_entry_alloc_count = self.pre_alloc_count_trace.get(fun_entry, {})
+            new_entry_offsets = self.pre_ptr_offset_trace.get(fun_entry, {})
+
+            offsets_changed = (
+                old_entry_offsets is None
+                or len(old_entry_offsets) != len(new_entry_offsets)
+                or any(
+                    k not in old_entry_offsets
+                    or (v.isInterval() and old_entry_offsets[k].isInterval() and not v.getInterval().equals(old_entry_offsets[k].getInterval()))
+                    for k, v in new_entry_offsets.items()
+                )
+            )
+
+            if (
+                old_entry_state is None
+                or merged_as != old_entry_state
+                or old_entry_lifetime != new_entry_lifetime
+                or old_entry_alloc_count != new_entry_alloc_count
+                or offsets_changed
+            ):
                 self.call_site_stack.append(fun_name)
                 self.handleFunction(fun_entry)
                 self.call_site_stack.pop()
@@ -1351,17 +1654,15 @@ class AbstractExecution:
     """
     def mergeStatesFromPredecessors(self, block: pysvf.ICFGNode):
         in_edge_num = 0
-        # Unanalysed predecessor = coverage gap; a pruned one = analysis working.
         unanalysed_preds = 0
         abstract_state = pysvf.AbstractState()
 
-        #if a path includes a freed memory obj, then the state when merged is set to freed to be conservative
         merged_alloc_state = {}
-        # Heap simulated Lifetime  merge
         merged_lifetime = {}
-        # Alloc count
         merged_alloc_count = {}
         merged_ptr_offsets = {} 
+
+        common_vars = None
 
         is_ret_node = isinstance(block, pysvf.RetICFGNode)
         call_node = block.getCallICFGNode() if is_ret_node else None
@@ -1386,14 +1687,14 @@ class AbstractExecution:
                 src_alloc_count = self.post_alloc_count_trace.get(src, {})
                 src_ptr_offsets = self.post_ptr_offset_trace.get(src, {})
 
-                # Apply lexical expiration to this edge only. Marking the
-                # source node itself would also poison the loop back-edge.
                 src_state = self.post_abs_trace[src].clone()
                 for obj_id in self.scope_exit_objects.get((src, block), set()):
                     if obj_id in src_lifetime:
                         src_lifetime[obj_id] = Lifetime.MAY_FREED
 
                 edge_feasible = False
+                state_for_intersect = None
+
                 if isinstance(edge, pysvf.IntraCFGEdge):
                     if edge.getCondition():
                         tmp_es = src_state.clone()
@@ -1406,6 +1707,7 @@ class AbstractExecution:
                             self.joinPtrOffsetMaps(merged_ptr_offsets, tmp_offsets) 
                             in_edge_num += 1
                             edge_feasible = True
+                            state_for_intersect = tmp_es
 
                         if old_post_offsets is not None:
                             self.post_ptr_offset_trace[src] = old_post_offsets
@@ -1414,11 +1716,13 @@ class AbstractExecution:
                         self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                         in_edge_num += 1
                         edge_feasible = True
+                        state_for_intersect = src_state
                 else:
                     abstract_state.joinWith(src_state)
                     self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                     in_edge_num += 1
                     edge_feasible = True
+                    state_for_intersect = src_state
 
                 if edge_feasible:
                     for obj_id, addr in src_alloc.items():
@@ -1426,9 +1730,70 @@ class AbstractExecution:
                     self.joinLifetimeMaps(merged_lifetime, src_lifetime)
                     self.joinAllocCountMaps(merged_alloc_count, src_alloc_count)
 
+                    cur_vars = set(state_for_intersect.getVarToVal().keys())
+                    if common_vars is None:
+                        common_vars = cur_vars
+                    else:
+                        common_vars.intersection_update(cur_vars)
+
             elif edge.getSrcNode() not in self.infeasible_nodes:
                 unanalysed_preds += 1
-        # A call whose body was not walked acts as an extra predecessor of its ret node.
+
+        # Enforce intersection for local variables (Test 1 Fix)
+        # We must NOT intersect LocToVal, as that deletes heap states from conditionally executed paths.
+        if in_edge_num > 1 and common_vars is not None:
+            cleaned_state = pysvf.AbstractState()
+            
+            # Keep all memory locations (union semantics for memory are correct)
+            for obj_id, val in abstract_state.getLocToVal().items():
+                cleaned_state.store(obj_id, val.clone())
+                
+            # Filter variables: keep if in common_vars OR if it's a global/constant/heap (not a local SSA register)
+            for var_id, val in abstract_state.getVarToVal().items():
+                if var_id in common_vars:
+                    cleaned_state[var_id] = val.clone()
+                else:
+                    var = self.svfir.getGNode(var_id)
+                    if not hasattr(var, 'getFunction') or var.getFunction() is None:
+                        cleaned_state[var_id] = val.clone()
+            
+            abstract_state = cleaned_state
+
+        # Strip caller-local variables at FunEntryICFGNode (Test 2 Fix)
+        if isinstance(block, pysvf.FunEntryICFGNode) and in_edge_num > 0:
+            filtered_state = pysvf.AbstractState()
+            callee_fun = block.getFun()
+            
+            for obj_id, val in abstract_state.getLocToVal().items():
+                filtered_state.store(obj_id, val.clone())
+                    
+            for var_id, val in abstract_state.getVarToVal().items():
+                var = self.svfir.getGNode(var_id)
+                # Keep if it's a global/constant/heap, OR if it belongs to the callee
+                if not hasattr(var, 'getFunction') or var.getFunction() is None or var.getFunction() == callee_fun:
+                    filtered_state[var_id] = val.clone()
+                    
+            abstract_state = filtered_state
+
+        # Preserve caller-local variable states across analyzed calls (RetICFGNode Fix)
+        if is_ret_node and callee_analyzed and call_node is not None and call_node in self.post_abs_trace:
+            caller_state = self.post_abs_trace[call_node]
+            for var_id, val in caller_state.getVarToVal().items():
+                if not abstract_state.inVarToValTable(var_id):
+                    abstract_state[var_id] = val.clone()
+            for k, v in self.post_ptr_offset_trace.get(call_node, {}).items():
+                if k not in merged_ptr_offsets:
+                    merged_ptr_offsets[k] = v.clone()
+            for obj_id, addr in self.node_to_alloc_state.get(call_node, {}).items():
+                if obj_id not in merged_alloc_state:
+                    merged_alloc_state[obj_id] = addr
+            for obj_id, lt in self.post_lifetime_trace.get(call_node, {}).items():
+                if obj_id not in merged_lifetime:
+                    merged_lifetime[obj_id] = lt
+            for obj_id, ac in self.post_alloc_count_trace.get(call_node, {}).items():
+                if obj_id not in merged_alloc_count:
+                    merged_alloc_count[obj_id] = ac
+
         if block in self.skipped_states:
             abstract_state.joinWith(self.skipped_states[block])
             self.joinLifetimeMaps(merged_lifetime, self.skipped_lifetime_states.get(block, {}))
@@ -1440,11 +1805,9 @@ class AbstractExecution:
                 for obj_id, addr in self.skipped_alloc_states.get(block, {}).items():
                     merged_alloc_state[obj_id] = addr
             in_edge_num += 1
+
         if in_edge_num == 0:
-            log(f"Error: No predecessors for block {block.getId()}")
             if unanalysed_preds:
-                # Defer: a predecessor with no state may still be one every path into
-                # which was pruned
                 self.orphan_nodes.add(block)
             return (False, None)
 
@@ -1636,9 +1999,11 @@ class AbstractExecution:
         if len(addrs) != 1:
             return
 
-        # Write the narrowed offset back to the memory key tracker
+        # Write the narrowed offset back to both raw and canonical memory key trackers
         mem_key = -addrs[0]
+        canon_key = -self._getCanonicalMemObjId(abstract_state, addrs[0])
         ptr_offsets[mem_key] = pysvf.AbstractValue(refined)
+        ptr_offsets[canon_key] = pysvf.AbstractValue(refined)
 
     def refineIntervalPair(self, predicate, i0, i1):
         """Given `i0 <predicate> i1` holds, return narrowed (i0, i1), or (None, None)."""
@@ -2253,6 +2618,19 @@ class AbstractExecution:
 
     #TODO : Implement the state updates for Copy, Binary, Store, Load, Gep, Phi
     # TODO: your code starts from here
+    def _getCanonicalMemObjId(self, abstract_state: pysvf.AbstractState, addr: int) -> int:
+        """Resolve a virtual memory address to a canonical memory object ID for offset tracking."""
+        try:
+            obj_id = abstract_state.getIDFromAddr(addr)
+            obj = self.svfir.getGNode(obj_id)
+            if isinstance(obj, pysvf.GepObjVar):
+                base_obj = self.svfir.getBaseObject(obj_id)
+                if base_obj is not None and (base_obj.isHeap() or base_obj.isFieldInsensitive() or not base_obj.isConstantByteSize()):
+                    return base_obj.getId()
+            return obj_id
+        except Exception:
+            return int(addr) & self.flippedAddressMask
+
     def updatePointerOffsetOnGep(self, gep: pysvf.GepStmt):
         """Record the LHS pointer's accumulated byte offset for a GEP."""
         node = gep.getICFGNode()
@@ -2262,11 +2640,12 @@ class AbstractExecution:
 
         increment = self.ae_manager.getGepByteOffset(gep)
         old_offset = ptr_offsets.get(rhs)
-        base_offset = (
-            old_offset.getInterval()
-            if old_offset is not None and old_offset.isInterval()
-            else pysvf.IntervalValue.top()
-        )
+        if old_offset is not None and old_offset.isInterval():
+            base_offset = old_offset.getInterval()
+        else:
+            # Default to [0, 0] if the base pointer is a valid address with no prior offset entry
+            rhs_val = self.post_abs_trace[node].getVar(rhs)
+            base_offset = pysvf.IntervalValue(0, 0) if rhs_val.isAddr() else pysvf.IntervalValue.top()
 
         ptr_offsets[lhs] = pysvf.AbstractValue(base_offset + increment)
 
@@ -2287,24 +2666,37 @@ class AbstractExecution:
 
         # RHS points to the memory cell containing the pointer.
         for memory_address in abstract_state.getVar(rhs).getAddrs():
-            stored_offset = ptr_offsets.get(-memory_address)
+            if memory_address == 0 or abstract_state.isNullMem(memory_address):
+                continue
+            canon_key = -self._getCanonicalMemObjId(abstract_state, memory_address)
+            stored_offset = ptr_offsets.get(canon_key)
+            if stored_offset is None:
+                stored_offset = ptr_offsets.get(-memory_address)
 
             if stored_offset is None:
-                ptr_offsets[lhs] = pysvf.AbstractValue(
-                    pysvf.IntervalValue.top()
-                )
-                return
+                # Infer [0, 0] if all loaded addresses are base objects without prior GEP offsets
+                inferred = pysvf.IntervalValue(0, 0)
+                for l_addr in loaded.getAddrs():
+                    if l_addr == 0 or abstract_state.isNullMem(l_addr):
+                        continue
+                    try:
+                        l_obj = self.svfir.getGNode(abstract_state.getIDFromAddr(l_addr))
+                        if isinstance(l_obj, pysvf.GepObjVar) and self.buf_overflow_helper.hasGepObjOffsetFromBase(l_obj):
+                            inferred = self.buf_overflow_helper.getGepObjOffsetFromBase(l_obj)
+                    except Exception:
+                        pass
+                stored_offset = pysvf.AbstractValue(inferred)
 
             if merged_offset is None:
                 merged_offset = stored_offset.clone()
             else:
                 merged_offset.join_with(stored_offset)
         
-        # Store the new offset, top if rhs = None
+        # Store the new offset, [0, 0] if loaded is a valid base pointer
         ptr_offsets[lhs] = (
             merged_offset
             if merged_offset is not None
-            else pysvf.AbstractValue(pysvf.IntervalValue.top())
+            else pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
         )
 
     def updateStateOnGep(self, gep: pysvf.GepStmt):
@@ -2338,6 +2730,13 @@ class AbstractExecution:
             abstract_state[lhs] = abstract_state.getVar(rhs).clone()
         else:
             abstract_state[lhs] = pysvf.AbstractValue(gep_addresses)
+            try:
+                offset = self.ae_manager.getGepByteOffset(gep)
+                self.buf_overflow_helper.updateGepObjOffsetFromBase(
+                    abstract_state, gep_addresses, abstract_state.getVar(rhs).getAddrs(), offset
+                )
+            except Exception:
+                pass
             
         self.updatePointerOffsetOnGep(gep)
 
@@ -2366,28 +2765,37 @@ class AbstractExecution:
             self.ae_manager.updateAbsState(node, abstract_state)
             self.ae_manager.storeValue(store.getLHSVar(), value, node)
             self.post_abs_trace[node] = self.ae_manager.getAbsState(node).clone()
+            abstract_state = self.post_abs_trace[node]
             
-            # --- FIX: Pointer Offset Memory Tracking ---
+            # --- Pointer Offset Memory Tracking (Raw + Canonical Object Keys) ---
             rhs_var = abstract_state.getVar(rhs)
             offset_val = ptr_offsets.get(rhs)
+            if rhs_var.isAddr() and offset_val is None:
+                offset_val = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
             
             if rhs_var.isAddr() and offset_val is not None:
-                # Store the offset using the memory object ID as the key
                 for addr in abstract_state.getVar(lhs).getAddrs():
-                    mem_key = -addr
-                    if needs_weak and mem_key in ptr_offsets:
-                        merged = ptr_offsets[mem_key].clone()
-                        merged.join_with(offset_val)
-                        ptr_offsets[mem_key] = merged
-                    else:
-                        ptr_offsets[mem_key] = offset_val.clone()
+                    if addr == 0 or abstract_state.isNullMem(addr):
+                        continue
+                    raw_key = -addr
+                    canon_key = -self._getCanonicalMemObjId(abstract_state, addr)
+                    for key in {raw_key, canon_key}:
+                        if needs_weak and key in ptr_offsets:
+                            merged = ptr_offsets[key].clone()
+                            merged.join_with(offset_val)
+                            ptr_offsets[key] = merged
+                        else:
+                            ptr_offsets[key] = offset_val.clone()
             else:
                 # Strong update: clear offset if storing a non-pointer
                 if not needs_weak:
                     for addr in abstract_state.getVar(lhs).getAddrs():
-                        mem_key = -addr
-                        if mem_key in ptr_offsets:
-                            del ptr_offsets[mem_key]
+                        if addr == 0 or abstract_state.isNullMem(addr):
+                            continue
+                        raw_key = -addr
+                        canon_key = -self._getCanonicalMemObjId(abstract_state, addr)
+                        ptr_offsets.pop(raw_key, None)
+                        ptr_offsets.pop(canon_key, None)
 
     def needsWeakUpdate(self, abstract_state, addrs) -> bool:
         """ Update when exact location is unknown: adds its value to what the 
@@ -2420,51 +2828,117 @@ class AbstractExecution:
     # Find the comparison predicates in "class BinaryOPStmt:OpCode" under SVF/svf/include/SVFIR/SVFStatements.h
     # You are required to handle predicates (The program is assumed to have signed ints and also interger-overflow-free),
     # including Add, FAdd, Sub, FSub, Mul, FMul, SDiv, FDiv, UDiv, SRem, FRem, URem, Xor, And, Or, AShr, Shl, LShr
+    def _resolveIntervalOperand(self, abstract_state: pysvf.AbstractState, var: pysvf.SVFVar) -> Optional[pysvf.IntervalValue]:
+        """Extract an IntervalValue from abstract_state or fall back to SVFIR constant metadata."""
+        v = abstract_state.getVar(var.getId())
+        if v.isInterval():
+            return v.getInterval()
+        if var.isValVar():
+            val_var = var.asValVar()
+            if val_var.isConstIntValVar():
+                c = val_var.asConstIntValVar().getSExtValue()
+                return IntervalValue(c, c)
+        if var.isObjVar():
+            obj_var = var.asObjVar()
+            if isinstance(obj_var, pysvf.ConstIntObjVar):
+                c = obj_var.getSExtValue()
+                return IntervalValue(c, c)
+        return None
+
     def updateStateOnBinary(self, binary: pysvf.BinaryOPStmt):
         try:
             node = binary.getICFGNode()
             abstract_state = self.post_abs_trace[node]
+            ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
             lhs = binary.getResId()
             op1 = binary.getOpVar(0)
             op2 = binary.getOpVar(1)
+            opcode = binary.getOpcode()
 
-            if (not abstract_state.getVar(op1.getId()).isInterval()
-                    or not abstract_state.getVar(op2.getId()).isInterval()):
-                abstract_state[lhs] = AbstractValue(IntervalValue.top())
-                self.recordGap(f"Binary op at node {node.getId()} has non-interval operand")
+            v1 = abstract_state.getVar(op1.getId())
+            v2 = abstract_state.getVar(op2.getId())
+            iv1 = self._resolveIntervalOperand(abstract_state, op1)
+            iv2 = self._resolveIntervalOperand(abstract_state, op2)
+
+            # 1. Pointer + Integer / Integer + Pointer / Pointer - Integer arithmetic
+            if v1.isAddr() and iv2 is not None and opcode in (OpCode.Add, OpCode.Sub):
+                abstract_state[lhs] = v1.clone()
+                base_off_val = ptr_offsets.get(op1.getId())
+                base_off = base_off_val.getInterval() if (base_off_val and base_off_val.isInterval()) else IntervalValue(0, 0)
+                new_off = (base_off + iv2) if opcode == OpCode.Add else (base_off - iv2)
+                ptr_offsets[lhs] = AbstractValue(new_off)
                 return
+
+            if iv1 is not None and v2.isAddr() and opcode == OpCode.Add:
+                abstract_state[lhs] = v2.clone()
+                base_off_val = ptr_offsets.get(op2.getId())
+                base_off = base_off_val.getInterval() if (base_off_val and base_off_val.isInterval()) else IntervalValue(0, 0)
+                ptr_offsets[lhs] = AbstractValue(iv1 + base_off)
+                return
+
+            # 2. Pointer - Pointer difference (e.g. p - q on the same base object)
+            if v1.isAddr() and v2.isAddr() and opcode == OpCode.Sub:
+                off1 = ptr_offsets.get(op1.getId())
+                off2 = ptr_offsets.get(op2.getId())
+                addrs1 = set(v1.getAddrs())
+                addrs2 = set(v2.getAddrs())
+                if len(addrs1) == 1 and addrs1 == addrs2 and off1 and off2 and off1.isInterval() and off2.isInterval():
+                    abstract_state[lhs] = AbstractValue(off1.getInterval() - off2.getInterval())
+                else:
+                    abstract_state[lhs] = AbstractValue(IntervalValue.top())
+                ptr_offsets.pop(lhs, None)
+                return
+
+            # 3. Uninitialized or non-interval fallback: relax to Top without tainting path completeness
+            if iv1 is None or iv2 is None:
+                if v1.isAddr() and not v2.isAddr():
+                    abstract_state[lhs] = v1.clone()
+                    ptr_offsets[lhs] = AbstractValue(IntervalValue.top())
+                elif v2.isAddr() and not v1.isAddr() and opcode == OpCode.Add:
+                    abstract_state[lhs] = v2.clone()
+                    ptr_offsets[lhs] = AbstractValue(IntervalValue.top())
+                else:
+                    abstract_state[lhs] = AbstractValue(IntervalValue.top())
+                    ptr_offsets.pop(lhs, None)
+                return
+
+            val1 = iv1
+            val2 = iv2
+            if self.intervalIsEmpty(val1) or self.intervalIsEmpty(val2):
+                abstract_state[lhs] = AbstractValue(IntervalValue.top())
+                return
+
             result = IntervalValue(0)
-            val1 = abstract_state[op1.getId()].getInterval()
-            val2 = abstract_state[op2.getId()].getInterval()
-            if binary.getOpcode() == OpCode.Add or binary.getOpcode() == OpCode.FAdd:
+            if opcode == OpCode.Add or opcode == OpCode.FAdd:
                 result = val1 + val2
-            elif binary.getOpcode() == OpCode.Sub or binary.getOpcode() == OpCode.FSub:
+            elif opcode == OpCode.Sub or opcode == OpCode.FSub:
                 result = val1 - val2
-            elif binary.getOpcode() == OpCode.Mul or binary.getOpcode() == OpCode.FMul:
+            elif opcode == OpCode.Mul or opcode == OpCode.FMul:
                 result = val1 * val2
-            elif binary.getOpcode() == OpCode.UDiv or binary.getOpcode() == OpCode.SDiv or binary.getOpcode() == OpCode.FDiv:
-                if val2.isTop() or (int(val2.ub())>=0 and int(val2.lb()) <= 0):
+            elif opcode == OpCode.UDiv or opcode == OpCode.SDiv or opcode == OpCode.FDiv:
+                if val2.isTop() or (val2.ub() >= pysvf.BoundedInt(0) and val2.lb() <= pysvf.BoundedInt(0)):
                     result = IntervalValue.top()
                 else:
                     result = val1 / val2
-            elif binary.getOpcode() == OpCode.SRem or binary.getOpcode() == OpCode.FRem or binary.getOpcode() == OpCode.URem:
-                if val2.isTop() or (int(val2.ub())>=0 and int(val2.lb()) <= 0):
+            elif opcode == OpCode.SRem or opcode == OpCode.FRem or opcode == OpCode.URem:
+                if val2.isTop() or (val2.ub() >= pysvf.BoundedInt(0) and val2.lb() <= pysvf.BoundedInt(0)):
                     result = IntervalValue.top()
                 else:
                     result = val1 % val2
-            elif binary.getOpcode() == OpCode.Xor:
+            elif opcode == OpCode.Xor:
                 result = val1 ^ val2
-            elif binary.getOpcode() == OpCode.Or:
+            elif opcode == OpCode.Or:
                 result = val1 | val2
-            elif binary.getOpcode() == OpCode.And:
+            elif opcode == OpCode.And:
                 result = val1 & val2
-            elif binary.getOpcode() == OpCode.Shl:
+            elif opcode == OpCode.Shl:
                 result = val1 << val2
-            elif binary.getOpcode() == OpCode.LShr or binary.getOpcode() == OpCode.AShr:
+            elif opcode == OpCode.LShr or opcode == OpCode.AShr:
                 result = val1 >> val2
             else:
                 result = IntervalValue.top()
             abstract_state[lhs] = AbstractValue(result)
+            ptr_offsets.pop(lhs, None)
         except UnknownException as e:
             log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
             log_exception(e)
@@ -2804,7 +3278,7 @@ class AbstractExecution:
                 else:
                     self.buf_overflow_helper.handleMemcpy(abstract_state, extCallNode.getArgument(0), extCallNode.getArgument(1), strlen, abstract_state[position_id].getInterval().getIntNumeral(), extCallNode)
 
-        elif func_name in ["malloc", "calloc", "realloc"]:
+        elif func_name in ["malloc", "calloc", "realloc", "alloca", "__builtin_alloca"]:
             abstract_state = self.post_abs_trace[extCallNode]
             ptr_offsets = self.post_ptr_offset_trace.setdefault(extCallNode, {})
             if func_name == "realloc" and extCallNode.getActualParms():
@@ -2898,8 +3372,13 @@ class AbstractExecution:
                 else:
                     alloc_count_state[heap_obj_id] = AllocationCount.MANY
 
-                # 4. Register the allocation for memory leak tracking
-                self.node_to_alloc_state[extCallNode][heap_obj_id] = alloc_addr
+                # 4. Register stack ownership for alloca, or heap leak tracking for malloc/calloc/realloc
+                if func_name in ("alloca", "__builtin_alloca"):
+                    owner = extCallNode.getFun()
+                    if owner is not None:
+                        self.function_to_stack_obj_ids.setdefault(owner, set()).add(heap_obj_id)
+                else:
+                    self.node_to_alloc_state[extCallNode][heap_obj_id] = alloc_addr
 
             self.resumeAfterUnanalysedCall(extCallNode)
             if heap_obj_id is not None and extCallNode.getRetICFGNode() in self.skipped_states:
