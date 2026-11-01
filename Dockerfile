@@ -37,7 +37,7 @@ CMD ["/usr/sbin/sshd", "-D"]
 
 
 # Define dependencies.
-ENV lib_deps="clang-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="clang-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libc6-dev-i386 libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 ENV runtime="python3 python3-venv"
 

@@ -183,24 +183,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             kind, subproperty = memory
             print(f"MEMORY Incorrect({subproperty})")
             correctness = "Incorrect"
-        elif len(ae.results.get("nulldereference", [])) > 0:
-            print("MEMORY Incorrect(valid-deref)")
-            correctness = "Incorrect"
-            
-        elif len(ae.results.get("useafterfree", [])) > 0:
-            print("MEMORY Incorrect(valid-deref)")
-            correctness = "Incorrect"
-
-        elif len(ae.results.get("doublefree", [])) > 0:
-            print("MEMORY Incorrect(valid-free)")
-            correctness = "Incorrect"
-            
-        elif len(ae.results.get("memoryleak", [])) > 0:
-            print("MEMORY Incorrect(valid-memtrack)")
-            correctness = "Incorrect"
-        elif len(ae.results.get("badfree", [])) > 0:
-            print("MEMORY Incorrect(valid-free)")
-            correctness = "Incorrect"            
         else:
             print("MEMORY Correct")
             correctness = "Correct"

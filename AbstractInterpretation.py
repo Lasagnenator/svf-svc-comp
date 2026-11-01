@@ -24,6 +24,12 @@ class Lifetime(Enum):
     MAY_FREED = 2
     FREED = 3
 
+class PointerInit(Enum):
+    """Initialization state for pointer SSA values and pointer-typed cells."""
+    INITIALIZED = 1
+    MAYBE_INITIALIZED = 2
+    UNINITIALIZED = 3
+
 class UnknownException(Exception):
     def __init__(self, msg: str):
         super().__init__(msg)
@@ -242,6 +248,7 @@ class AbstractExecutionHelper:
         self.bug_reports = {
             "Buffer Overflow": [],
             "Null Pointer Dereference": [],
+            "Invalid Pointer Dereference": [],
             "Use After Free": [],
             "Double Free": [],
             "Memory Leak": [],
@@ -258,6 +265,9 @@ class AbstractExecutionHelper:
 
     def reportNullDereference(self, node, msg):
         self._register_bug("Null Pointer Dereference", node, msg)
+
+    def reportInvalidDereference(self, node, msg):
+        self._register_bug("Invalid Pointer Dereference", node, msg)
 
     def reportUseAfterFree(self, node, msg):
         self._register_bug("Use After Free", node, msg)
@@ -492,6 +502,13 @@ class AbstractExecution:
         self.pre_ptr_offset_trace = {}   # node -> {var_id: IntervalValue}
         self.post_ptr_offset_trace = {}  # node -> {var_id: IntervalValue}
 
+        # Pointer initialization is deliberately separate from AbstractValue.
+        # A top interval can mean analysis imprecision; it must not be confused
+        # with a load from a pointer slot that has no reaching store.
+        # Positive keys are SSA variable IDs; negative keys are memory-object IDs.
+        self.pre_pointer_init_trace = {}
+        self.post_pointer_init_trace = {}
+
         # Allocation abstract state before/after each ICFG node
         self.pre_alloc_count_trace = {}
         self.post_alloc_count_trace = {}
@@ -505,6 +522,7 @@ class AbstractExecution:
 
         # For calls whose body is skipped, analogous to skipped_states
         self.skipped_lifetime_states = {}
+        self.skipped_pointer_init_states = {}
 
         ###SVF SV-COMP-ADDITION
         # storing results here for now, feel free to replace or update how we store it
@@ -532,6 +550,7 @@ class AbstractExecution:
         self.results["useafterfree"] = []
         self.results["doublefree"] = []
         self.results["badfree"] = []
+        self.results["invaliddereference"] = []
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -687,6 +706,52 @@ class AbstractExecution:
             else:
                 dst[var_id].join_with(src_val)
 
+    @staticmethod
+    def joinPointerInit(lhs: PointerInit, rhs: PointerInit) -> PointerInit:
+        if lhs == rhs:
+            return lhs
+        return PointerInit.MAYBE_INITIALIZED
+
+    def joinPointerInitPredecessors(self, states):
+        """Join feasible predecessor maps; absence conservatively means initialized.
+
+        This makes UNINITIALIZED a must fact. If just one feasible predecessor
+        lacks that fact, the result is MAYBE_INITIALIZED rather than a bug claim.
+        """
+        if not states:
+            return {}
+        keys = set().union(*(state.keys() for state in states))
+        result = {}
+        for key in keys:
+            value = states[0].get(key, PointerInit.INITIALIZED)
+            for state in states[1:]:
+                value = self.joinPointerInit(
+                    value, state.get(key, PointerInit.INITIALIZED)
+                )
+            if value != PointerInit.INITIALIZED:
+                result[key] = value
+        return result
+
+    def pointerInitState(self, node, key: int) -> PointerInit:
+        return self.post_pointer_init_trace.get(node, {}).get(
+            key, PointerInit.INITIALIZED
+        )
+
+    def setPointerInitState(self, node, key: int, value: PointerInit):
+        state = self.post_pointer_init_trace.setdefault(node, {})
+        if value == PointerInit.INITIALIZED:
+            state.pop(key, None)
+        else:
+            state[key] = value
+
+    @staticmethod
+    def isPointerTyped(var) -> bool:
+        try:
+            var_type = var.getType()
+            return var_type is not None and var_type.isPointerTy()
+        except Exception:
+            return False
+
 
     """
     Handle the global ICFG node by initializing its abstract state and updating it based on its statements.
@@ -709,6 +774,8 @@ class AbstractExecution:
         # Initialize the offset trace natively as standard Python dictionaries
         self.pre_ptr_offset_trace[global_node] = {}
         self.post_ptr_offset_trace[global_node] = {}
+        self.pre_pointer_init_trace[global_node] = {}
+        self.post_pointer_init_trace[global_node] = {}
 
         global_state = self.post_abs_trace[self.icfg.getGlobalICFGNode()]
         global_state[0] = AbstractValue(AddressValue(set()))
@@ -858,6 +925,7 @@ class AbstractExecution:
         last_as = self.post_abs_trace[node] if node in self.post_abs_trace else None
         last_lifetime = self.post_lifetime_trace[node].copy() if node in self.post_lifetime_trace else None
         last_alloc_count = self.post_alloc_count_trace[node].copy() if node in self.post_alloc_count_trace else None
+        last_pointer_init = self.post_pointer_init_trace.get(node, {}).copy()
 
         last_ptr_offsets = None
         if node in self.post_ptr_offset_trace:
@@ -868,6 +936,7 @@ class AbstractExecution:
         self.post_abs_trace[node] = self.pre_abs_trace[node]
         self.post_lifetime_trace[node] = self.pre_lifetime_trace.get(node, {}).copy()
         self.post_alloc_count_trace[node] = self.pre_alloc_count_trace.get(node, {}).copy()
+        self.post_pointer_init_trace[node] = self.pre_pointer_init_trace.get(node, {}).copy()
 
         self.post_ptr_offset_trace[node] = {}
         for k, v in self.pre_ptr_offset_trace.get(node, {}).items():
@@ -898,6 +967,9 @@ class AbstractExecution:
         abs_unchanged = (last_as is not None and self.post_abs_trace[node] == last_as)
         lifetime_unchanged = (last_lifetime is not None and self.post_lifetime_trace[node] == last_lifetime)
         alloc_count_unchanged = (last_alloc_count is not None and self.post_alloc_count_trace[node] == last_alloc_count)
+        pointer_init_unchanged = (
+            last_pointer_init == self.post_pointer_init_trace[node]
+        )
 
         ptr_offsets_unchanged = True
         if last_ptr_offsets is None or len(last_ptr_offsets) != len(self.post_ptr_offset_trace[node]):
@@ -909,7 +981,8 @@ class AbstractExecution:
                     ptr_offsets_unchanged = False
                     break
 
-        if abs_unchanged and lifetime_unchanged and alloc_count_unchanged and ptr_offsets_unchanged:
+        if (abs_unchanged and lifetime_unchanged and alloc_count_unchanged
+                and ptr_offsets_unchanged and pointer_init_unchanged):
             return False
 
         return True
@@ -1308,6 +1381,9 @@ class AbstractExecution:
         self.skipped_lifetime_states[ret] = (
             self.post_lifetime_trace.get(node, {}).copy()
         )
+        self.skipped_pointer_init_states[ret] = (
+            self.post_pointer_init_trace.get(node, {}).copy()
+        )
         if not hasattr(self, "skipped_ptr_offset_states"):
             self.skipped_ptr_offset_states = {}
         if not hasattr(self, "skipped_alloc_count_states"):
@@ -1472,6 +1548,7 @@ class AbstractExecution:
             old_entry_state = self.post_abs_trace.get(fun_entry)
             old_entry_lifetime = self.post_lifetime_trace.get(fun_entry, {}).copy() if fun_entry in self.post_lifetime_trace else None
             old_entry_alloc_count = self.post_alloc_count_trace.get(fun_entry, {}).copy() if fun_entry in self.post_alloc_count_trace else None
+            old_entry_pointer_init = self.post_pointer_init_trace.get(fun_entry, {}).copy() if fun_entry in self.post_pointer_init_trace else None
             old_entry_offsets = (
                 {k: v.clone() for k, v in self.post_ptr_offset_trace[fun_entry].items()}
                 if fun_entry in self.post_ptr_offset_trace else None
@@ -1485,6 +1562,7 @@ class AbstractExecution:
             new_entry_lifetime = self.pre_lifetime_trace.get(fun_entry, {})
             new_entry_alloc_count = self.pre_alloc_count_trace.get(fun_entry, {})
             new_entry_offsets = self.pre_ptr_offset_trace.get(fun_entry, {})
+            new_entry_pointer_init = self.pre_pointer_init_trace.get(fun_entry, {})
 
             offsets_changed = (
                 old_entry_offsets is None
@@ -1501,6 +1579,7 @@ class AbstractExecution:
                 or merged_as != old_entry_state
                 or old_entry_lifetime != new_entry_lifetime
                 or old_entry_alloc_count != new_entry_alloc_count
+                or old_entry_pointer_init != new_entry_pointer_init
                 or offsets_changed
             ):
                 self.call_site_stack.append(fun_name)
@@ -1661,6 +1740,8 @@ class AbstractExecution:
         merged_lifetime = {}
         merged_alloc_count = {}
         merged_ptr_offsets = {} 
+        feasible_pointer_init_states = []
+        preserved_caller_pointer_init = {}
 
         common_vars = None
 
@@ -1686,6 +1767,7 @@ class AbstractExecution:
                 src_lifetime = self.post_lifetime_trace.get(src, {}).copy()
                 src_alloc_count = self.post_alloc_count_trace.get(src, {})
                 src_ptr_offsets = self.post_ptr_offset_trace.get(src, {})
+                src_pointer_init = self.post_pointer_init_trace.get(src, {})
 
                 src_state = self.post_abs_trace[src].clone()
                 for obj_id in self.scope_exit_objects.get((src, block), set()):
@@ -1725,6 +1807,7 @@ class AbstractExecution:
                     state_for_intersect = src_state
 
                 if edge_feasible:
+                    feasible_pointer_init_states.append(src_pointer_init.copy())
                     for obj_id, addr in src_alloc.items():
                         merged_alloc_state[obj_id] = addr
                     self.joinLifetimeMaps(merged_lifetime, src_lifetime)
@@ -1794,6 +1877,11 @@ class AbstractExecution:
                 if obj_id not in merged_alloc_count:
                     merged_alloc_count[obj_id] = ac
 
+            # Caller-local pointer facts must survive the call/return edge.
+            preserved_caller_pointer_init = self.post_pointer_init_trace.get(
+                call_node, {}
+            ).copy()
+
         if block in self.skipped_states:
             abstract_state.joinWith(self.skipped_states[block])
             self.joinLifetimeMaps(merged_lifetime, self.skipped_lifetime_states.get(block, {}))
@@ -1804,6 +1892,9 @@ class AbstractExecution:
             if hasattr(self, "skipped_alloc_states"):
                 for obj_id, addr in self.skipped_alloc_states.get(block, {}).items():
                     merged_alloc_state[obj_id] = addr
+            feasible_pointer_init_states.append(
+                self.skipped_pointer_init_states.get(block, {}).copy()
+            )
             in_edge_num += 1
 
         if in_edge_num == 0:
@@ -1815,6 +1906,27 @@ class AbstractExecution:
         self.pre_lifetime_trace[block] = merged_lifetime
         self.pre_alloc_count_trace[block] = merged_alloc_count
         self.pre_ptr_offset_trace[block] = merged_ptr_offsets
+        merged_pointer_init = self.joinPointerInitPredecessors(
+            feasible_pointer_init_states
+        )
+        merged_pointer_init.update(preserved_caller_pointer_init)
+
+        # Do not carry unrelated caller SSA facts into a callee. CallPE transfer
+        # below obtains the actual argument fact directly from its call node.
+        if isinstance(block, pysvf.FunEntryICFGNode):
+            callee_fun = block.getFun()
+            filtered_init = {}
+            for key, value in merged_pointer_init.items():
+                if key < 0:
+                    filtered_init[key] = value
+                    continue
+                var = self.svfir.getGNode(key)
+                if (not hasattr(var, 'getFunction') or var.getFunction() is None
+                        or var.getFunction() == callee_fun):
+                    filtered_init[key] = value
+            merged_pointer_init = filtered_init
+
+        self.pre_pointer_init_trace[block] = merged_pointer_init
 
         return (True, abstract_state)
 
@@ -2156,7 +2268,7 @@ class AbstractExecution:
             self.finaliseGaps()
 
             # Filter out any bugs recorded on nodes that turned out to be infeasible after narrowing
-            for key in ("bufferoverflow", "nulldereference", "useafterfree", "doublefree", "badfree"):
+            for key in ("bufferoverflow", "nulldereference", "invaliddereference", "useafterfree", "doublefree", "badfree"):
                 self.results[key] = [
                     n for n in self.results[key]
                     if (n.getICFGNode() if isinstance(n, pysvf.SVFStmt) else n) in self.post_abs_trace
@@ -2329,6 +2441,9 @@ class AbstractExecution:
         ## Tracking pointers offset
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
         ptr_offsets[addr.getLHSVarID()] = AbstractValue(pysvf.IntervalValue(0, 0))
+        self.setPointerInitState(
+            node, addr.getLHSVarID(), PointerInit.INITIALIZED
+        )
 
 
     def unsignedCompare(self, predicate, lhs, rhs):
@@ -2483,12 +2598,18 @@ class AbstractExecution:
         
         result = None
         result_offset = None
+        init_states = []
         
         for index in range(call.getOpVarNum()):
             call_node = call.getOpCallICFGNode(index)
             if call_node in self.post_abs_trace:
                 actual_id = call.getOpVarId(index)
                 val = self.post_abs_trace[call_node].getVar(actual_id)
+                init_states.append(
+                    self.post_pointer_init_trace.get(call_node, {}).get(
+                        actual_id, PointerInit.INITIALIZED
+                    )
+                )
                 
                 if result is None:
                     result = val
@@ -2511,6 +2632,11 @@ class AbstractExecution:
         
         if result_offset is not None:
             ptr_offsets[call.getResId()] = result_offset
+        if init_states:
+            init_result = init_states[0]
+            for init_state in init_states[1:]:
+                init_result = self.joinPointerInit(init_result, init_state)
+            self.setPointerInitState(node, call.getResId(), init_result)
 
 
     def updateStateOnRet(self, ret: pysvf.RetPE):
@@ -2524,6 +2650,9 @@ class AbstractExecution:
         # Propagate Return Value
         val = abstract_state.getVar(rhs_id)
         abstract_state[lhs_id] = val.clone()
+        self.setPointerInitState(
+            node, lhs_id, self.pointerInitState(node, rhs_id)
+        )
         
         # Propagate Return Pointer Offsets
         if rhs_id in ptr_offsets:
@@ -2547,11 +2676,17 @@ class AbstractExecution:
                 abstract_state[res] = abstract_state.getVar(fval).clone()
                 if fval in ptr_offsets:
                     ptr_offsets[res] = ptr_offsets[fval].clone()
+                self.setPointerInitState(
+                    node, res, self.pointerInitState(node, fval)
+                )
                 return
             if condition.is_numeral():
                 abstract_state[res] = abstract_state.getVar(tval).clone()
                 if tval in ptr_offsets:
                     ptr_offsets[res] = ptr_offsets[tval].clone()
+                self.setPointerInitState(
+                    node, res, self.pointerInitState(node, tval)
+                )
                 return
                 
         # Merge both execution paths
@@ -2573,6 +2708,14 @@ class AbstractExecution:
                 
         if res_off is not None:
             ptr_offsets[res] = res_off
+        self.setPointerInitState(
+            node,
+            res,
+            self.joinPointerInit(
+                self.pointerInitState(node, tval),
+                self.pointerInitState(node, fval),
+            ),
+        )
 
 
 
@@ -2707,6 +2850,9 @@ class AbstractExecution:
 
         lhs = gep.getLHSVarID()
         rhs = gep.getRHSVarID()
+        self.setPointerInitState(
+            node, lhs, self.pointerInitState(node, rhs)
+        )
 
         if not abstract_state.getVar(rhs).isAddr():
             abstract_state[lhs] = pysvf.AbstractValue(
@@ -2748,6 +2894,7 @@ class AbstractExecution:
         
         lhs = store.getLHSVarID() # Memory location
         rhs = store.getRHSVarID() # Value being stored
+        rhs_init = self.pointerInitState(node, rhs)
 
         self.checkMemorySafety(node, lhs)
         self.checkBufferOverflow(node, lhs)
@@ -2755,6 +2902,7 @@ class AbstractExecution:
         if abstract_state.getVar(lhs).isAddr():
             value = abstract_state[rhs]
             needs_weak = self.needsWeakUpdate(abstract_state, abstract_state[lhs].getAddrs())
+            target_addrs = list(abstract_state[lhs].getAddrs())
             
             if needs_weak:
                 value = value.clone()
@@ -2796,6 +2944,20 @@ class AbstractExecution:
                         canon_key = -self._getCanonicalMemObjId(abstract_state, addr)
                         ptr_offsets.pop(raw_key, None)
                         ptr_offsets.pop(canon_key, None)
+
+            # Preserve initialization provenance for pointer values stored in
+            # memory. Only pointer-typed RHS values participate in this domain.
+            if self.isPointerTyped(store.getRHSVar()):
+                for addr in target_addrs:
+                    if addr == 0 or abstract_state.isNullMem(addr):
+                        continue
+                    key = -self._getCanonicalMemObjId(abstract_state, addr)
+                    stored_state = rhs_init
+                    if needs_weak:
+                        stored_state = self.joinPointerInit(
+                            self.pointerInitState(node, key), rhs_init
+                        )
+                    self.setPointerInitState(node, key, stored_state)
 
     def needsWeakUpdate(self, abstract_state, addrs) -> bool:
         """ Update when exact location is unknown: adds its value to what the 
@@ -2867,6 +3029,9 @@ class AbstractExecution:
                 base_off = base_off_val.getInterval() if (base_off_val and base_off_val.isInterval()) else IntervalValue(0, 0)
                 new_off = (base_off + iv2) if opcode == OpCode.Add else (base_off - iv2)
                 ptr_offsets[lhs] = AbstractValue(new_off)
+                self.setPointerInitState(
+                    node, lhs, self.pointerInitState(node, op1.getId())
+                )
                 return
 
             if iv1 is not None and v2.isAddr() and opcode == OpCode.Add:
@@ -2874,6 +3039,9 @@ class AbstractExecution:
                 base_off_val = ptr_offsets.get(op2.getId())
                 base_off = base_off_val.getInterval() if (base_off_val and base_off_val.isInterval()) else IntervalValue(0, 0)
                 ptr_offsets[lhs] = AbstractValue(iv1 + base_off)
+                self.setPointerInitState(
+                    node, lhs, self.pointerInitState(node, op2.getId())
+                )
                 return
 
             # 2. Pointer - Pointer difference (e.g. p - q on the same base object)
@@ -2894,9 +3062,15 @@ class AbstractExecution:
                 if v1.isAddr() and not v2.isAddr():
                     abstract_state[lhs] = v1.clone()
                     ptr_offsets[lhs] = AbstractValue(IntervalValue.top())
+                    self.setPointerInitState(
+                        node, lhs, self.pointerInitState(node, op1.getId())
+                    )
                 elif v2.isAddr() and not v1.isAddr() and opcode == OpCode.Add:
                     abstract_state[lhs] = v2.clone()
                     ptr_offsets[lhs] = AbstractValue(IntervalValue.top())
+                    self.setPointerInitState(
+                        node, lhs, self.pointerInitState(node, op2.getId())
+                    )
                 else:
                     abstract_state[lhs] = AbstractValue(IntervalValue.top())
                     ptr_offsets.pop(lhs, None)
@@ -2970,6 +3144,29 @@ class AbstractExecution:
         lhs = load.getLHSVarID()
         rhs = load.getRHSVarID()
 
+        loaded_init = PointerInit.INITIALIZED
+        if self.isPointerTyped(load.getLHSVar()):
+            ptr = abstract_state.getVar(rhs)
+            states = []
+            if ptr.isAddr():
+                for addr in ptr.getAddrs():
+                    if addr == 0 or abstract_state.isNullMem(addr):
+                        continue
+                    key = -self._getCanonicalMemObjId(abstract_state, addr)
+                    if key in self.post_pointer_init_trace.get(node, {}):
+                        states.append(self.pointerInitState(node, key))
+                    else:
+                        obj_id = abstract_state.getIDFromAddr(addr)
+                        states.append(
+                            PointerInit.INITIALIZED
+                            if obj_id in abstract_state.getLocToVal()
+                            else PointerInit.UNINITIALIZED
+                        )
+            if states:
+                loaded_init = states[0]
+                for state in states[1:]:
+                    loaded_init = self.joinPointerInit(loaded_init, state)
+
         # Memory-safety checks before dereferencing RHS
         self.checkMemorySafety(node, rhs)
         self.checkBufferOverflow(node, rhs)
@@ -2977,12 +3174,14 @@ class AbstractExecution:
         # Invalid/non-pointer RHS: conservatively make result unknown
         if not abstract_state.getVar(rhs).isAddr():
             abstract_state[lhs] = pysvf.AbstractValue(pysvf.IntervalValue.top())
+            self.setPointerInitState(node, lhs, loaded_init)
             return
 
         self.ae_manager.updateAbsState(node, abstract_state)
 
         loaded = self.loadAbstractValue(load)
         abstract_state[lhs] = loaded
+        self.setPointerInitState(node, lhs, loaded_init)
         self.updatePointerOffsetOnLoad(load, loaded)
 
     #TODO: your code starts from here
@@ -3018,6 +3217,9 @@ class AbstractExecution:
             abstract_state[lhs] = rhs_val.clone() if (rhs_val.isInterval() or rhs_val.isAddr()) else rhs_val
         if rhs in ptr_offsets:
             ptr_offsets[lhs] = ptr_offsets[rhs].clone()
+        self.setPointerInitState(
+            node, lhs, self.pointerInitState(node, rhs)
+        )
 
 
     # TODO: your code starts from here
@@ -3029,6 +3231,7 @@ class AbstractExecution:
         lhs = phi.getResId()
         result = None
         result_offset = None
+        result_init = None
         
         for i in range(phi.getOpVarNum()):
             op_var = phi.getOpVar(i)
@@ -3038,6 +3241,11 @@ class AbstractExecution:
                 
             op_id = op_var.getId()
             op_val = abstract_state.getVar(op_id)
+            op_init = self.pointerInitState(node, op_id)
+            result_init = (
+                op_init if result_init is None
+                else self.joinPointerInit(result_init, op_init)
+            )
             
             if op_val.isInterval() or op_val.isAddr():
                 if result is None:
@@ -3060,6 +3268,8 @@ class AbstractExecution:
             abstract_state[lhs] = result
         if result_offset is not None:
             ptr_offsets[lhs] = result_offset
+        if result_init is not None:
+            self.setPointerInitState(node, lhs, result_init)
 
     """
     Detect buffer overflows in the given statement.
@@ -3498,6 +3708,7 @@ class AbstractExecution:
             # 1. Snapshot previous state
             pre_iteration_as = self.post_abs_trace[head].clone() if (iteration > 0 and head in self.post_abs_trace) else None
             pre_iteration_lifetime = self.post_lifetime_trace.get(head, {}).copy() if iteration > 0 else {}
+            pre_iteration_pointer_init = self.post_pointer_init_trace.get(head, {}).copy() if iteration > 0 else {}
 
             pre_iteration_ptr_offsets = {}
             if iteration > 0 and head in self.post_ptr_offset_trace:
@@ -3514,6 +3725,7 @@ class AbstractExecution:
 
             cur_iteration_as = self.post_abs_trace[head]
             cur_iteration_lifetime = self.post_lifetime_trace.get(head, {}).copy()
+            cur_iteration_pointer_init = self.post_pointer_init_trace.get(head, {}).copy()
             cur_iteration_ptr_offsets = self.post_ptr_offset_trace.get(head, {})
 
             # 3. Widening / Narrowing Logic
@@ -3555,8 +3767,12 @@ class AbstractExecution:
 
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
+                    pointer_init_stable = (
+                        cur_iteration_pointer_init == pre_iteration_pointer_init
+                    )
 
-                    if (abs_stable and lifetime_stable and ptr_stable) or iteration >= MAX_WIDENING:
+                    if (abs_stable and lifetime_stable and ptr_stable
+                            and pointer_init_stable) or iteration >= MAX_WIDENING:
                         increasing = False
                         narrowing_iters = 0
 
@@ -3579,8 +3795,12 @@ class AbstractExecution:
 
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
+                    pointer_init_stable = (
+                        cur_iteration_pointer_init == pre_iteration_pointer_init
+                    )
 
-                    if abs_stable and lifetime_stable and ptr_stable:
+                    if (abs_stable and lifetime_stable and ptr_stable
+                            and pointer_init_stable):
                         break
 
                     narrowing_iters += 1
@@ -3617,6 +3837,19 @@ class AbstractExecution:
         abstract_state = self.post_abs_trace[node]
         lifetime_state = self.post_lifetime_trace.get(node, {})
         ptr_val = abstract_state.getVar(ptr_id)
+        init_state = self.pointerInitState(node, ptr_id)
+
+        if init_state == PointerInit.UNINITIALIZED:
+            msg = "Invalid dereference of a definitely uninitialized pointer."
+            self.buf_overflow_helper.reportInvalidDereference(node, msg)
+            if node not in self.results["invaliddereference"]:
+                self.results["invaliddereference"].append(node)
+            return
+        if init_state == PointerInit.MAYBE_INITIALIZED:
+            self.recordGap(
+                f"May dereference an uninitialized pointer at node {node.getId()}"
+            )
+            return
 
         # Grab the underlying SVFVar directly from the IR
         ptr_var = self.svfir.getGNode(ptr_id)
