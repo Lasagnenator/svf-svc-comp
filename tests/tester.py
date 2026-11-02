@@ -45,6 +45,7 @@ SUPPORTED_PROPERTIES = {
     "safety",
     # "cleanup",
 }
+DEFAULT_VALIDATOR_COMMAND = "tests/validate_witness.sh {witness} {input} {property} {bits}"
 RESULT_RE = re.compile(
     r"^(?P<kind>REACH|MEMORY|CLEANUP|OVERFLOW) (?P<verdict>Correct|Incorrect)"
     r"(?:\((?P<subproperty>[^)]+)\))?$"
@@ -587,6 +588,15 @@ def validate_witness(task, answer, args, witness_path, input_paths, property_pat
     return "correct" if not timed_out and process.returncode == 0 else "unconfirmed"
 
 
+def resolve_validator_command(args, environ=os.environ):
+    if args.no_validate:
+        return None
+    if args.validator_command:
+        return args.validator_command
+    if environ.get("CPACHECKER_HOME"):
+        return DEFAULT_VALIDATOR_COMMAND
+
+
 def diagnostic_tail(text, lines=12):
     nonempty = [line for line in text.splitlines() if line.strip()]
     return "\n".join(nonempty[-lines:]) or None
@@ -809,6 +819,8 @@ def build_parser():
                         help="JSON object mapping run IDs to correct or unconfirmed witness status")
     parser.add_argument("--validator-command",
                         help="validator command template; supports {witness}, {input}, {property}, {bits}")
+    parser.add_argument("--no-validate", action="store_true",
+                        help="skip witness validation even when CPACHECKER_HOME is set")
     parser.add_argument("--validation-wall-limit", type=int,
                         help="override validator wall seconds (default: 300 correctness, 90 violation)")
     parser.add_argument("--verbose", "-v", action="count", default=0)
@@ -829,6 +841,12 @@ def main(argv=None):
     args.memory_limit_mib = args.memory_limit_mib or defaults[2]
     args.category = args.category or []
     property_flags = (args.reach, args.safety, args.cleanup, args.overflow, args.termination)
+    if args.no_validate and args.validator_command:
+        build_parser().error("--no-validate cannot be combined with --validator-command")
+    args.validator_command = resolve_validator_command(args)
+    if args.validator_command is None and not args.no_validate:
+        print("CPACHECKER_HOME is not set, so witnesses will not be validated. "
+              "Set it, pass --validator-command or pass --no-validate.", file=sys.stderr)
     if not args.category and not any(property_flags):
         build_parser().error("select at least one property flag or --category")
     if args.category and (any(property_flags) or args.sets):
