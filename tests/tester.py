@@ -721,10 +721,20 @@ def run_task(task, args, logs_dir):
 
 def summarize(results, population, selected, elapsed, interrupted=False):
     counts = {}
+    correct_answers = {
+        f"{status}_{answer}": 0
+        for answer in ("true", "false")
+        for status in ("confirmed", "unconfirmed", "not_required")
+    }
     for result in results:
         key = result.classification if result.answer == "unknown" else (
             "correct" if result.answer == str(result.expected).lower() else "wrong")
         counts[key] = counts.get(key, 0) + 1
+        if key == "correct":
+            validation = getattr(result, "witness_validation", "unconfirmed")
+            status = {"correct": "confirmed", "not-required": "not_required"}.get(
+                validation, "unconfirmed")
+            correct_answers[f"{status}_{result.answer}"] += 1
     eligible = [task for task in selected if score_eligible(task)]
     maximum = sum(2 if task.expected else 1 for task in eligible)
     category_scores = {}
@@ -754,6 +764,7 @@ def summarize(results, population, selected, elapsed, interrupted=False):
         "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
+        "correct_answers": correct_answers,
         "witness_validation": {
             "generated": len(witnesses),
             "confirmed": confirmed,
@@ -977,11 +988,13 @@ def main(argv=None):
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         write_csv(args.output, results)
-    print(f"Competition score: {summary['score']:+d}/{summary['maximum_selected_score']} "
+    print(f"Raw SV-COMP-style score: {summary['score']:+d}/{summary['maximum_selected_score']} "
           f"from {summary['completed']}/{summary['selected']} runs")
     if summary["normalized_score"] is not None:
         print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))
+    print("Correct answers: " + ", ".join(
+        f"{key}={value}" for key, value in summary["correct_answers"].items()))
     validation = summary["witness_validation"]
     print(f"Witnesses confirmed: {validation['confirmed']}/{validation['generated']}")
     # Distinguish harness failure from analyser weakness so CI can gate on the exit code.
