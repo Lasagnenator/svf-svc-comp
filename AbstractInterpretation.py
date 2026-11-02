@@ -494,7 +494,6 @@ class AbstractExecution:
         self.loop_stack_objects = {}
         self.scope_exit_objects = {}
 
-
         # Used for tracking offsets for pointers
         # This is because the current SVF architecture collapsed the array 
         # So arry[10]; p = &array[2] and q = &p[3] will cause p, q and array to be the same Object ID
@@ -518,7 +517,14 @@ class AbstractExecution:
         self.post_alloc_count_trace = {}
 
         # Dynamic byte size intervals for heap and variable-length stack objects: base_obj_id -> IntervalValue
+        # Joined over every allocation seen, so it over-approximates each state's size.
         self.alloc_size_trace: Dict[int, pysvf.IntervalValue] = {}
+
+        # Checks reached while a loop is still being widened see an unstable state.
+        # They are queued here and replayed once the outermost loop has stabilised.
+        # key -> (check function, args)
+        self._in_widening_phase = False
+        self.deferred_checks = {}
 
         # For calls whose body is skipped, analogous to skipped_states
         self.skipped_lifetime_states = {}
@@ -545,7 +551,8 @@ class AbstractExecution:
         # Ret node -> state carried over from its call node when the function body is not analysed.
         self.skipped_states = {}
 
-        self.results["memoryleak"] = []
+        self.results["lost_memory"] = []       # valid-memtrack
+        self.results["unreleased_memory"] = [] # valid-memcleanup
         self.results["nulldereference"] = []
         self.results["useafterfree"] = []
         self.results["doublefree"] = []
@@ -1051,36 +1058,14 @@ class AbstractExecution:
     def _checkExternalBufferAccess(self, node: pysvf.CallICFGNode, ptr_id: int, access_len_iv: Optional[pysvf.IntervalValue]):
         """Validate pointer safety and optional byte length access on an external call argument."""
         self.checkMemorySafety(node, ptr_id)
-        self.checkBufferOverflow(node, ptr_id)
-        if access_len_iv is None or getattr(self, "_in_widening_phase", False):
-            return
-        if self.intervalIsEmpty(access_len_iv) or access_len_iv.isTop():
-            return
-        max_len = int(access_len_iv.ub()) if not access_len_iv.ub().is_infinity else -1
-        if max_len <= 0:
-            return
 
-        abstract_state = self.post_abs_trace.get(node)
-        if abstract_state is None:
-            return
-        ptr_val = abstract_state.getVar(ptr_id)
-        if not ptr_val.isAddr():
-            return
-
-        ptr_offsets = self.post_ptr_offset_trace.get(node, {})
-        off_val = ptr_offsets.get(ptr_id)
-        base_off = off_val.getInterval() if (off_val and off_val.isInterval()) else pysvf.IntervalValue(0, 0)
-        if base_off.isTop() or self.intervalIsEmpty(base_off):
-            return
-
-        end_offset = base_off + pysvf.IntervalValue(max(0, int(access_len_iv.lb()) - 1), max_len - 1)
-        saved_off = ptr_offsets.get(ptr_id)
-        ptr_offsets[ptr_id] = pysvf.AbstractValue(end_offset)
-        self.checkBufferOverflow(node, ptr_id)
-        if saved_off is not None:
-            ptr_offsets[ptr_id] = saved_off
-        else:
-            ptr_offsets.pop(ptr_id, None)
+        # Without a usable length, check just the first byte.
+        width = pysvf.IntervalValue(1, 1)
+        if (access_len_iv is not None and not access_len_iv.isTop()
+                and not self.intervalIsEmpty(access_len_iv)
+                and not access_len_iv.ub().is_infinity and int(access_len_iv.ub()) > 0):
+            width = pysvf.IntervalValue(max(1, int(access_len_iv.lb())), int(access_len_iv.ub()))
+        self.checkBufferOverflow(node, ptr_id, width)
 
     def handleMemoryCall(self, node: pysvf.CallICFGNode, fun_name: str):
         abstract_state = self.post_abs_trace.get(node)
@@ -2430,13 +2415,20 @@ class AbstractExecution:
             self.post_lifetime_trace[node][obj_id] = Lifetime.ALLOCATED
 
             if not base_obj.isConstantByteSize() or base_obj.getByteSizeOfObj() == 0:
-                try:
-                    self.ae_manager.updateAbsState(node, abstract_state)
-                    alloca_size = self.ae_manager.getAllocaInstByteSize(addr)
-                    if alloca_size > 0:
-                        self.alloc_size_trace[obj_id] = pysvf.IntervalValue(alloca_size, alloca_size)
-                except Exception:
-                    pass
+                size_iv = self.getDynamicAllocaByteSize(addr, base_obj, abstract_state)
+                if size_iv is None:
+                    try:
+                        self.ae_manager.updateAbsState(node, abstract_state)
+                        alloca_size = self.ae_manager.getAllocaInstByteSize(addr)
+                        if alloca_size > 0:
+                            size_iv = pysvf.IntervalValue(alloca_size, alloca_size)
+                    except Exception:
+                        pass
+                if size_iv is not None:
+                    if obj_id in self.alloc_size_trace:
+                        self.alloc_size_trace[obj_id].join_with(size_iv)
+                    else:
+                        self.alloc_size_trace[obj_id] = size_iv
         
         ## Tracking pointers offset
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
@@ -2445,6 +2437,36 @@ class AbstractExecution:
             node, addr.getLHSVarID(), PointerInit.INITIALIZED
         )
 
+
+    def getDynamicAllocaByteSize(self, addr: pysvf.AddrStmt, base_obj, abstract_state) -> Optional[pysvf.IntervalValue]:
+        """Byte size of a variable-length alloca: element size * product of the
+        array-size operands (LLVM `alloca T, %n`), or None if it cannot be bounded."""
+        try:
+            dims = addr.getArrSize()
+            elem_type = base_obj.getType()
+            elem_size = elem_type.getByteSize() if elem_type is not None else 0
+        except Exception:
+            return None
+        if not dims or elem_size <= 0:
+            return None
+
+        size_iv = pysvf.IntervalValue(elem_size, elem_size)
+        for dim in dims:
+            dim_id = dim.getId()
+            if not abstract_state.inVarToValTable(dim_id):
+                return None
+            dim_val = abstract_state.getVar(dim_id)
+            if not dim_val.isInterval() or self.intervalIsEmpty(dim_val.getInterval()):
+                return None
+            size_iv = size_iv * dim_val.getInterval()
+
+        # A negative size is undefined behaviour; only non-negative sizes can be allocated.
+        zero = pysvf.BoundedInt(0)
+        if size_iv.ub() < zero:
+            return None
+        if size_iv.lb() < zero:
+            size_iv = pysvf.IntervalValue(zero, size_iv.ub())
+        return size_iv
 
     def unsignedCompare(self, predicate, lhs, rhs):
         """Unsigned compare over signed intervals; only decidable when both sides are non-negative."""
@@ -2897,7 +2919,7 @@ class AbstractExecution:
         rhs_init = self.pointerInitState(node, rhs)
 
         self.checkMemorySafety(node, lhs)
-        self.checkBufferOverflow(node, lhs)
+        self.checkBufferOverflow(node, lhs, self.accessWidth(store.getRHSVar()))
 
         if abstract_state.getVar(lhs).isAddr():
             value = abstract_state[rhs]
@@ -3169,7 +3191,7 @@ class AbstractExecution:
 
         # Memory-safety checks before dereferencing RHS
         self.checkMemorySafety(node, rhs)
-        self.checkBufferOverflow(node, rhs)
+        self.checkBufferOverflow(node, rhs, self.accessWidth(load.getLHSVar()))
 
         # Invalid/non-pointer RHS: conservatively make result unknown
         if not abstract_state.getVar(rhs).isAddr():
@@ -3298,8 +3320,40 @@ class AbstractExecution:
             return pysvf.IntervalValue(sz, sz)
         return None
 
-    def checkBufferOverflow(self, node: pysvf.ICFGNode, ptr_id: int):
-        if node not in self.post_abs_trace or getattr(self, "_in_widening_phase", False):
+    @staticmethod
+    def accessWidth(var) -> int:
+        """Bytes read or written through a load/store of `var`, from its LLVM type."""
+        try:
+            size = var.getType().getByteSize()
+            return size if size > 0 else 1
+        except Exception:
+            return 1
+
+    def deferCheck(self, key, check, *args):
+        """Queue a check whose state is not yet stable; see replayDeferredChecks."""
+        self.deferred_checks.setdefault(key, (check, args))
+
+    def replayDeferredChecks(self):
+        """Run queued checks against the stabilised post-states.
+
+        Called once the outermost loop reaches its fixpoint. That covers the loop's
+        own nodes and every callee node analysed during it.
+        """
+        pending = self.deferred_checks
+        self.deferred_checks = {}
+        for check, args in pending.values():
+            check(*args)
+
+    def checkBufferOverflow(self, node: pysvf.ICFGNode, ptr_id: int, access_width=1):
+        """Check that the bytes [offset, offset + access_width) lie inside every
+        object ptr_id may point to. access_width is an int or an IntervalValue."""
+        if node not in self.post_abs_trace:
+            return
+        if not isinstance(access_width, pysvf.IntervalValue):
+            access_width = pysvf.IntervalValue(access_width, access_width)
+        if self._in_widening_phase:
+            self.deferCheck(("bounds", node.getId(), ptr_id, str(access_width)),
+                            self.checkBufferOverflow, node, ptr_id, access_width.clone())
             return
 
         abstract_state = self.post_abs_trace[node]
@@ -3347,23 +3401,26 @@ class AbstractExecution:
                     )
                     continue
 
+                # The access covers [offset, offset + width); its end is exclusive.
+                end_offset = current_offset + access_width
+
                 # Definite overflow if:
                 # 1) upper bound of offset is negative (definite underflow), OR
-                # 2) lower bound of offset >= upper bound of object size
+                # 2) even the smallest access ends past the largest object size
                 if not current_offset.isTop() and (
                     current_offset.ub() < zero
-                    or (not size_iv.ub().is_infinity and current_offset.lb() >= size_iv.ub())
+                    or (not size_iv.ub().is_infinity and end_offset.lb() > size_iv.ub())
                 ):
                     may_overflow = True
                 # Possible overflow if:
                 # 1) offset is Top, OR
                 # 2) lower bound of offset is negative, OR
-                # 3) upper bound of offset >= lower bound of object size
+                # 3) the largest access ends past the smallest object size
                 elif (
                     current_offset.isTop()
                     or current_offset.lb() < zero
-                    or current_offset.ub().is_infinity
-                    or current_offset.ub() >= size_iv.lb()
+                    or end_offset.ub().is_infinity
+                    or end_offset.ub() > size_iv.lb()
                 ):
                     must_overflow = False
                     may_overflow = True
@@ -3374,7 +3431,7 @@ class AbstractExecution:
                 continue
 
         if must_overflow:
-            msg = f"Buffer overflow detected. Accessing offset {current_offset}"
+            msg = f"Buffer overflow detected. Accessing offset {current_offset} with width {access_width}"
             self.buf_overflow_helper.reportBufOverflow(node, msg)
             if node not in self.results["bufferoverflow"]:
                 self.results["bufferoverflow"].append(node)
@@ -3604,22 +3661,15 @@ class AbstractExecution:
             arg_id = extCallNode.getArgument(0).getId()
             arg_val = abstract_state[arg_id]
 
-            offset_val = ptr_offsets.get(arg_id)
-            if offset_val and offset_val.isInterval():
-                offset = offset_val.getInterval()
+            # Check against the state before this free; the transfer below changes it.
+            if self._in_widening_phase:
+                self.deferCheck(("free", extCallNode.getId()), self.replayFreeCheck, extCallNode)
             else:
-                offset = pysvf.IntervalValue(0, 0)
+                self.checkFree(extCallNode, abstract_state, lifetime_state, ptr_offsets)
 
-            if not offset.isTop() and (int(offset.lb()) > 0 or int(offset.ub()) < 0):
-                if not getattr(self, "_in_widening_phase", False):
-                    msg = f"Bad Free detected: Attempting to free inner pointer at offset {offset}"
-                    self.buf_overflow_helper.reportBadFree(extCallNode, msg)
-                    self.results["badfree"].append(extCallNode)
-                self.resumeAfterUnanalysedCall(extCallNode)
-                return 
-            elif offset.isTop() or int(offset.lb()) != 0 or int(offset.ub()) != 0:
-                if not getattr(self, "_in_widening_phase", False):
-                    self.recordGap(f"May bad free at offset {offset}")
+            offset = self.freeOffset(ptr_offsets, arg_id)
+            if offset.isTop() or int(offset.lb()) != 0 or int(offset.ub()) != 0:
+                # A free not known to be at offset 0 is reported above; leave the state as is.
                 self.resumeAfterUnanalysedCall(extCallNode)
                 return
 
@@ -3633,16 +3683,8 @@ class AbstractExecution:
                     if addr == 0 or abstract_state.isNullMem(addr):
                         continue
 
-                    obj_id = abstract_state.getIDFromAddr(addr)
-                    base_obj = self.svfir.getBaseObject(obj_id)
-
+                    base_obj = self.getBaseObjectFromAddress(abstract_state, addr)
                     if base_obj is None or not base_obj.isHeap():
-                        if is_unique_target and not getattr(self, "_in_widening_phase", False):
-                            msg = f"Free_Memory_Not_on_Heap: Attempting to free non-heap address {addr}"
-                            self.buf_overflow_helper.reportBadFree(extCallNode, msg)
-                            self.results["badfree"].append(extCallNode)
-                        elif not getattr(self, "_in_widening_phase", False):
-                            self.recordGap(f"May free non-heap address {addr}")
                         continue
 
                     base_id = base_obj.getId()
@@ -3651,15 +3693,7 @@ class AbstractExecution:
                     alloc_count = alloc_count_state.get(base_id, AllocationCount.ONE)
 
                     if lifetime == Lifetime.FREED:
-                        if is_unique_target and not getattr(self, "_in_widening_phase", False):
-                            msg = f"Double free detected on address {addr}"
-                            self.buf_overflow_helper.reportDoubleFree(extCallNode, msg)
-                            self.results["doublefree"].append(extCallNode)
-                        elif not getattr(self, "_in_widening_phase", False):
-                            self.recordGap(f"May double free on address {addr}")
                         continue
-                    elif lifetime == Lifetime.MAY_FREED and not getattr(self, "_in_widening_phase", False):
-                        self.recordGap(f"May double free on MAY_FREED address {addr}")
 
                     if alloc_count == AllocationCount.ONE and is_unique_target:
                         # Strong update
@@ -3675,6 +3709,73 @@ class AbstractExecution:
                     self.addNativeFreedObject(abstract_state, base_obj)
 
             self.resumeAfterUnanalysedCall(extCallNode)
+
+    @staticmethod
+    def freeOffset(ptr_offsets, arg_id) -> pysvf.IntervalValue:
+        offset_val = ptr_offsets.get(arg_id)
+        if offset_val and offset_val.isInterval():
+            return offset_val.getInterval()
+        return pysvf.IntervalValue(0, 0)
+
+    def checkFree(self, node: pysvf.CallICFGNode, abstract_state, lifetime_state, ptr_offsets):
+        """Report invalid, non-heap and double frees for free(arg) at node.
+
+        lifetime_state must be the lifetime map from before this free. This only
+        reports; the free's effect on the state is applied by updateStateOnExtCall.
+        """
+        arg_id = node.getArgument(0).getId()
+        arg_val = abstract_state[arg_id]
+
+        offset = self.freeOffset(ptr_offsets, arg_id)
+        if not offset.isTop() and (int(offset.lb()) > 0 or int(offset.ub()) < 0):
+            msg = f"Bad Free detected: Attempting to free inner pointer at offset {offset}"
+            self.buf_overflow_helper.reportBadFree(node, msg)
+            if node not in self.results["badfree"]:
+                self.results["badfree"].append(node)
+            return
+        elif offset.isTop() or int(offset.lb()) != 0 or int(offset.ub()) != 0:
+            self.recordGap(f"May bad free at offset {offset}")
+            return
+
+        if not arg_val.isAddr():
+            return
+        addrs = list(arg_val.getAddrs())
+        non_null_addrs = [a for a in addrs if a != 0 and not abstract_state.isNullMem(a)]
+        is_unique_target = (len(addrs) == 1 and len(non_null_addrs) == 1)
+
+        for addr in non_null_addrs:
+            # Resolves addresses SVF has already marked freed back to their object.
+            base_obj = self.getBaseObjectFromAddress(abstract_state, addr)
+
+            if base_obj is None or not base_obj.isHeap():
+                if is_unique_target:
+                    msg = f"Free_Memory_Not_on_Heap: Attempting to free non-heap address {addr}"
+                    self.buf_overflow_helper.reportBadFree(node, msg)
+                    if node not in self.results["badfree"]:
+                        self.results["badfree"].append(node)
+                else:
+                    self.recordGap(f"May free non-heap address {addr}")
+                continue
+
+            lifetime = lifetime_state.get(base_obj.getId(), Lifetime.ALLOCATED)
+            if lifetime == Lifetime.FREED:
+                if is_unique_target:
+                    msg = f"Double free detected on address {addr}"
+                    self.buf_overflow_helper.reportDoubleFree(node, msg)
+                    if node not in self.results["doublefree"]:
+                        self.results["doublefree"].append(node)
+                else:
+                    self.recordGap(f"May double free on address {addr}")
+            elif lifetime == Lifetime.MAY_FREED:
+                self.recordGap(f"May double free on MAY_FREED address {addr}")
+
+    def replayFreeCheck(self, node: pysvf.CallICFGNode):
+        """Deferred checkFree, using the stabilised state from before the free."""
+        if node not in self.post_abs_trace:
+            return
+        self.checkFree(node, self.post_abs_trace[node],
+                       self.pre_lifetime_trace.get(node, {}),
+                       self.post_ptr_offset_trace.get(node, {}))
 
 
 
@@ -3771,8 +3872,13 @@ class AbstractExecution:
                         cur_iteration_pointer_init == pre_iteration_pointer_init
                     )
 
-                    if (abs_stable and lifetime_stable and ptr_stable
-                            and pointer_init_stable) or iteration >= MAX_WIDENING:
+                    stable = (abs_stable and lifetime_stable and ptr_stable
+                              and pointer_init_stable)
+                    if stable or iteration >= MAX_WIDENING:
+                        if not stable:
+                            # Not a post-fixpoint, so the loop's states may miss executions.
+                            self.recordGap(f"widening of cycle at node {head.getId()} "
+                                           f"stopped after {iteration} iterations without stabilising")
                         increasing = False
                         narrowing_iters = 0
 
@@ -3813,25 +3919,18 @@ class AbstractExecution:
             iteration += 1
 
         self._in_widening_phase = prev_widening_flag
-        # If we just finished the outermost loop, check the stabilized nodes once without re-evaluating transfers
+        # Once the outermost loop is stable, run the checks its fixpoint deferred,
+        # including those from callees analysed inside it, without re-running transfers.
         if not self._in_widening_phase:
-            for c_node in self.collectCycleNodes(cycle):
-                if c_node not in self.post_abs_trace or c_node in self.infeasible_nodes:
-                    continue
-                for st in c_node.getSVFStmts():
-                    if isinstance(st, pysvf.StoreStmt):
-                        self.checkMemorySafety(c_node, st.getLHSVarID())
-                        self.checkBufferOverflow(c_node, st.getLHSVarID())
-                    elif isinstance(st, pysvf.LoadStmt):
-                        self.checkMemorySafety(c_node, st.getRHSVarID())
-                        self.checkBufferOverflow(c_node, st.getRHSVarID())
-                if isinstance(c_node, pysvf.CallICFGNode) and c_node.getCalledFunction():
-                    if c_node.getCalledFunction().getName() == "free":
-                        self.updateStateOnExtCall(c_node)
+            self.replayDeferredChecks()
     
     
     def checkMemorySafety(self, node: pysvf.ICFGNode, ptr_id: int):
-        if node not in self.post_abs_trace or getattr(self, "_in_widening_phase", False):
+        if node not in self.post_abs_trace:
+            return
+        if self._in_widening_phase:
+            self.deferCheck(("deref", node.getId(), ptr_id),
+                            self.checkMemorySafety, node, ptr_id)
             return
 
         abstract_state = self.post_abs_trace[node]

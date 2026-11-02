@@ -19,7 +19,7 @@ MEMORY_FINDINGS = (
     ("invaliddereference", "valid-deref"),
     ("useafterfree", "valid-deref"),
     ("doublefree", "valid-free"),
-    ("memoryleak", "valid-memtrack"),
+    ("lost_memory", "valid-memtrack"),
     ("badfree", "valid-free"),
 )
 
