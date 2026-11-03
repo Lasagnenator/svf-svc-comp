@@ -792,7 +792,11 @@ class AbstractExecution:
                 if val_var.isConstNullPtrValVar():
                     global_state[var_id] = AbstractValue(AddressValue(pysvf.NullMemAddr))
                 elif val_var.isConstIntValVar():
-                    global_state[var_id] = AbstractValue(IntervalValue(val_var.asConstIntValVar().getSExtValue()))
+                    c = val_var.asConstIntValVar()
+                    numeral = c.getSExtValue()
+                    if numeral == -1 and c.getZExtValue() == 1:
+                        numeral = 1
+                    global_state[var_id] = AbstractValue(IntervalValue(numeral, numeral))
 
         for stmt in self.icfg.getGlobalICFGNode().getSVFStmts():
             self.updateAbsState(stmt)
@@ -1815,9 +1819,16 @@ class AbstractExecution:
             for obj_id, val in abstract_state.getLocToVal().items():
                 cleaned_state.store(obj_id, val.clone())
                 
-            # Filter variables: keep if in common_vars OR if it's a global/constant/heap (not a local SSA register)
+            # Extract variables required by Phi statements at this merge block
+            phi_op_vars = set()
+            for stmt in block.getSVFStmts():
+                if isinstance(stmt, pysvf.PhiStmt):
+                    for i in range(stmt.getOpVarNum()):
+                        phi_op_vars.add(stmt.getOpVar(i).getId())
+                
+            # Filter variables: keep if in common_vars, a phi operand, or a global/constant/heap
             for var_id, val in abstract_state.getVarToVal().items():
-                if var_id in common_vars:
+                if var_id in common_vars or var_id in phi_op_vars:
                     cleaned_state[var_id] = val.clone()
                 else:
                     var = self.svfir.getGNode(var_id)
@@ -2662,6 +2673,9 @@ class AbstractExecution:
 
     def updateStateOnRet(self, ret: pysvf.RetPE):
         node = ret.getICFGNode()
+        if node in self.skipped_states:
+            return
+            
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
         
@@ -3020,6 +3034,8 @@ class AbstractExecution:
             val_var = var.asValVar()
             if val_var.isConstIntValVar():
                 c = val_var.asConstIntValVar().getSExtValue()
+                if c == -1 and val_var.asConstIntValVar().getZExtValue() == 1:
+                    c = 1
                 return IntervalValue(c, c)
         if var.isObjVar():
             obj_var = var.asObjVar()
