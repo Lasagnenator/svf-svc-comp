@@ -1088,12 +1088,18 @@ class AbstractExecution:
                 len_iv = len_val.getInterval() if len_val.isInterval() else None
                 self._checkExternalBufferAccess(node, dst_id, len_iv)
                 val_arg = abstract_state.getVar(parms[1].getId())
-                if val_arg.isInterval() and val_arg.getInterval().is_zero() and dst_id in abstract_state:
-                    if abstract_state.getVar(dst_id).isAddr():
-                        for addr in abstract_state.getVar(dst_id).getAddrs():
-                            if addr != 0 and not abstract_state.isNullMem(addr):
-                                abstract_state.store(addr, pysvf.AbstractValue(pysvf.IntervalValue(0, 0)))
-                        self.ae_manager.updateAbsState(node, abstract_state)
+                if (
+                    val_arg.isInterval()
+                    and val_arg.getInterval().is_zero()
+                    and abstract_state.inVarToAddrsTable(dst_id)
+                ):
+                    for addr in abstract_state.getVar(dst_id).getAddrs():
+                        if addr != 0 and not abstract_state.isNullMem(addr):
+                            abstract_state.store(
+                                addr,
+                                pysvf.AbstractValue(pysvf.IntervalValue(0, 0)),
+                            )
+                    self.ae_manager.updateAbsState(node, abstract_state)
             elif (fun_name in ("memcpy", "memmove") or fun_name.startswith("llvm.memcpy") or fun_name.startswith("llvm.memmove")) and len(parms) >= 3:
                 src_var = parms[1]
                 src_id = src_var.getId()
@@ -2769,6 +2775,42 @@ class AbstractExecution:
     :return: The calculated access offset as an IntervalValue.
     :rtype: pysvf.IntervalValue
     """
+    def _getGepByteOffset(self, gep: pysvf.GepStmt) -> pysvf.IntervalValue:
+        """Return a GEP byte offset without violating SVF's typed-GEP precondition.
+
+        SVF also creates synthetic GEP statements while modelling external APIs.
+        Those statements do not have a source pointee type, and
+        AbstractInterpretation::getGepByteOffset eventually calls
+        AccessPath::computeConstantByteOffset, which aborts the process when the
+        type is missing.  An unknown offset is conservative for these GEPs: keep
+        the derived pointer targets, but do not claim a precise byte position.
+        """
+        node = gep.getICFGNode()
+        node_id = node.getId() if node is not None else "unknown"
+
+        try:
+            src_pointee_type = gep.getSrcPointeeType()
+        except Exception:
+            src_pointee_type = None
+
+        # The binding also reports no pointee type for some node-0 bookkeeping
+        # GEPs that SVF can evaluate.  The aborting ExternalAPI form is the
+        # untyped GEP attached to the modelled external call site.
+        is_external_api_gep = (
+            src_pointee_type is None
+            and isinstance(node, pysvf.CallICFGNode)
+        )
+        if is_external_api_gep:
+            reason = (
+                f"Cannot compute byte offset for untyped ExternalAPI GEP "
+                f"at node {node_id}"
+            )
+            if reason not in self.results["incomplete"]:
+                self.recordGap(reason)
+            return pysvf.IntervalValue.top()
+
+        return self.ae_manager.getGepByteOffset(gep)
+
     def getAccessOffset(self, objId: int, gep: pysvf.GepStmt) -> pysvf.IntervalValue:
         obj = self.svfir.getGNode(objId)
         abstract_state = self.post_abs_trace[gep.getICFGNode()]
@@ -2777,14 +2819,14 @@ class AbstractExecution:
         if isinstance(obj, pysvf.BaseObjVar):
             # Get base size
             self.ae_manager.updateAbsState(gep.getICFGNode(), abstract_state)
-            access_offset = self.ae_manager.getGepByteOffset(gep)
+            access_offset = self._getGepByteOffset(gep)
             return access_offset
 
         # A sub-object of an aggregate object
         elif isinstance(obj, pysvf.GepObjVar):
             access_offset = (
                     self.buf_overflow_helper.getGepObjOffsetFromBase(obj)
-                    + self.ae_manager.getGepByteOffset(gep)
+                    + self._getGepByteOffset(gep)
             )
             return access_offset
 
@@ -2809,14 +2851,19 @@ class AbstractExecution:
         except Exception:
             return int(addr) & self.flippedAddressMask
 
-    def updatePointerOffsetOnGep(self, gep: pysvf.GepStmt):
+    def updatePointerOffsetOnGep(
+        self,
+        gep: pysvf.GepStmt,
+        increment: Optional[pysvf.IntervalValue] = None,
+    ):
         """Record the LHS pointer's accumulated byte offset for a GEP."""
         node = gep.getICFGNode()
         lhs = gep.getLHSVarID()
         rhs = gep.getRHSVarID()
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
 
-        increment = self.ae_manager.getGepByteOffset(gep)
+        if increment is None:
+            increment = self._getGepByteOffset(gep)
         old_offset = ptr_offsets.get(rhs)
         if old_offset is not None and old_offset.isInterval():
             base_offset = old_offset.getInterval()
@@ -2900,6 +2947,10 @@ class AbstractExecution:
 
         self.ae_manager.updateAbsState(node, abstract_state)
 
+        # Compute this once.  Synthetic ExternalAPI GEPs have no pointee type,
+        # so the helper returns Top and deliberately avoids SVF's aborting API.
+        offset = self._getGepByteOffset(gep)
+
         # Create SVF's symbolic address for the derived pointer.
         gep_addresses = self.ae_manager.getGepObjAddrs(
             gep.getRHSVar(),
@@ -2912,14 +2963,18 @@ class AbstractExecution:
         else:
             abstract_state[lhs] = pysvf.AbstractValue(gep_addresses)
             try:
-                offset = self.ae_manager.getGepByteOffset(gep)
                 self.buf_overflow_helper.updateGepObjOffsetFromBase(
-                    abstract_state, gep_addresses, abstract_state.getVar(rhs).getAddrs(), offset
+                    abstract_state,
+                    gep_addresses,
+                    abstract_state.getVar(rhs).getAddrs(),
+                    offset,
                 )
             except Exception:
+                # This cache only improves precision; the pointer value and its
+                # conservative offset trace have already been updated safely.
                 pass
             
-        self.updatePointerOffsetOnGep(gep)
+        self.updatePointerOffsetOnGep(gep, offset)
 
     #TODO: your code starts from here
     def updateStateOnStore(self, store: pysvf.StoreStmt):
@@ -3462,7 +3517,7 @@ class AbstractExecution:
 
                 try:
                     self.ae_manager.updateAbsState(stmt.getICFGNode(), abstract_state)
-                    offset = self.ae_manager.getGepByteOffset(stmt)
+                    offset = self._getGepByteOffset(stmt)
                     self.buf_overflow_helper.updateGepObjOffsetFromBase(
                         abstract_state, abstract_state[lhs].getAddrs(), abstract_state[rhs].getAddrs(), offset
                     )
