@@ -551,8 +551,7 @@ class AbstractExecution:
         # Ret node -> state carried over from its call node when the function body is not analysed.
         self.skipped_states = {}
 
-        self.results["lost_memory"] = []       # valid-memtrack
-        self.results["unreleased_memory"] = [] # valid-memcleanup
+        self.results["memoryleak"] = []
         self.results["nulldereference"] = []
         self.results["useafterfree"] = []
         self.results["doublefree"] = []
