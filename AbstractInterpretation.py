@@ -1471,7 +1471,6 @@ class AbstractExecution:
                 if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                     lhs_id = node.getRetICFGNode().getActualRet().getId()
                     self.post_abs_trace[node][lhs_id] = pysvf.AbstractValue(pysvf.IntervalValue.top())
-                #fail("Unknown", 0)
             return
 
         # Handle Direct Calls
@@ -1530,12 +1529,10 @@ class AbstractExecution:
             else:
                 self.recordGap(f"external call not modelled: {fun_name}")
                 self.resumeAfterUnanalysedCall(node)
-                #fail("Unknown", 0)
         # Break direct recursive cycles using absolute string identity
         elif callee in self.recursive_funs or fun_name in self.call_site_stack:
             self.recordGap(f"recursive function body not analysed: {fun_name}")
             self.resumeAfterUnanalysedCall(node)
-            #fail("Unknown", 0)
             return
         else:
             fun_entry = self.svfir.getICFG().getFunEntryICFGNode(callee)
@@ -2312,7 +2309,7 @@ class AbstractExecution:
         self.ensureAllAssertsValidated()
 
         if self.results["incomplete"]:
-            log(f"INCOMPLETE GAPS ({len(self.results['incomplete'])}): {self.results['incomplete'][:5]}")
+            log(f"INCOMPLETE GAPS ({len(self.results['incomplete'])}): {self.results['incomplete']}")
 
         self.buf_overflow_helper.printReport()
 
