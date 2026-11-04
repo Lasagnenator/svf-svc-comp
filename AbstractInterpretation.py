@@ -642,12 +642,19 @@ class AbstractExecution:
 
     @staticmethod
     def getSourceLine(node):
-        """Return an ICFG node's source line, or None if it is unavailable."""
         if node is None:
             return None
-
-        match = re.search(r'"ln"\s*:\s*(\d+)', str(node.getSourceLoc()))
-        return int(match.group(1)) if match else None
+        
+        loc_str = str(node.getSourceLoc())
+        if not loc_str:
+            return None
+            
+        try:
+            #sample input: { "ln": 21, "cl": 6, "fl": "/tmp/tmpbvra0hxa.c" }
+            value_str = loc_str.split(':')[1].split(',')[0].strip()
+            return int(value_str)
+        except (IndexError, ValueError, AttributeError):
+            return None
 
     def collectCycleNodes(self, cycle):
         """Collect the ICFG nodes in a WTO cycle, including nested cycles."""
