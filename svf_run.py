@@ -179,10 +179,20 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # violations.MEMORY_FINDINGS checks our arrays in order and maps each to the
         # subproperty it violates.
         memory = violations.memory_violation(ae.results)
+        gaps = list(ae.results.get("incomplete", []))
+        log(f"Coverage gaps recorded: {len(gaps)}")
+        for reason in sorted(set(gaps))[:25]:
+            log(f"  gap: {reason}")
         if memory:
             kind, subproperty = memory
             print(f"MEMORY Incorrect({subproperty})")
             correctness = "Incorrect"
+        elif gaps:
+            # Some access could not be verified, so this is not a proof of safety.
+            log("No memory-safety violation found, but the analysis was incomplete; "
+                "reporting Unknown rather than claiming safety.")
+            print("Unknown")
+            correctness = "Unknown"
         else:
             print("MEMORY Correct")
             correctness = "Correct"
