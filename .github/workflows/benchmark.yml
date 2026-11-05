@@ -19,23 +19,29 @@ env:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install clang 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-21
+          clang-21 --version
+
       - name: Run tester unit tests
         run: python -m unittest tests.test_tester -v
 
   benchmark-sample:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: unit-tests
     timeout-minutes: 60
     steps:
@@ -43,8 +49,13 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -52,16 +63,11 @@ jobs:
       # pysvf bundles LLVM 21, so match the compiler that produces the IR it parses.
       - name: Install clang 21
         run: |
-          codename=$(lsb_release -cs)
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-21 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update
           sudo apt-get install -y clang-21
           sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
           clang --version
-      
+
       - name: Run smoketest
         run: bash smoketest.sh
 
@@ -100,6 +106,22 @@ jobs:
             --from-manifest "$RUNNER_TEMP/sample/manifest.json" \
             --dest "$BENCH_DIR"
 
+      - name: Cache CPAchecker
+        id: cpa-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/CPAchecker-4.2-unix
+          key: cpachecker-4.2
+
+      - name: Install CPAchecker
+        if: steps.cpa-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cpa.zip" https://cpachecker.sosy-lab.org/CPAchecker-4.2-unix.zip
+          unzip -q "$RUNNER_TEMP/cpa.zip" -d "$RUNNER_TEMP"
+
+      - name: Point tester at CPAchecker
+        run: echo "CPACHECKER_HOME=$RUNNER_TEMP/CPAchecker-4.2-unix" >> "$GITHUB_ENV"
+
       - name: Run benchmark sample
         run: |
           python tests/tester.py "$BENCH_DIR" "$PWD" \
@@ -109,6 +131,7 @@ jobs:
             --seed "$SEED" \
             --cpu-limit 15 \
             --wall-limit 25 \
+            --validation-wall-limit 60 \
             --results-dir "$RUNNER_TEMP/results"
 
       - name: Upload results
