@@ -134,12 +134,13 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         cfl_results = cfl.analyze()
         cfl_ids = {n.getId() for ok, n in cfl_results.get("reach", []) if ok and n is not None}
 
-        # Possible memory errors stay gaps here: the analysis is not yet sound past them.
-        # Those in global initialisers do not affect which paths reach reach_error.
-        gaps = list(ae.results.get("incomplete", [])) + list(ae.results.get("memory_gaps", []))
-        ignored = len(ae.results.get("global_memory_gaps", []))
+        # Only dropped paths are gaps here. Possible memory errors are for the memory
+        # properties: reach tasks are assumed free of undefined behaviour.
+        gaps = list(ae.results.get("incomplete", []))
+        ignored = (len(ae.results.get("memory_gaps", []))
+                   + len(ae.results.get("global_memory_gaps", [])))
         if ignored:
-            log(f"Ignored {ignored} memory gap(s) in global initialisers", category=Log.REACH)
+            log(f"Ignored {ignored} memory gap(s) for reachability", category=Log.REACH)
 
         ###SVF SV-COMP-ADDITION
         # An empty reach list is ambiguous: a never-visited site is a coverage gap, not a proof.
@@ -212,10 +213,20 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # violations.MEMORY_FINDINGS checks our arrays in order and maps each to the
         # subproperty it violates.
         memory = violations.memory_violation(ae.results)
+        gaps = list(ae.results.get("incomplete", []))
+        log(f"Coverage gaps recorded: {len(gaps)}")
+        for reason in sorted(set(gaps))[:25]:
+            log(f"  gap: {reason}")
         if memory:
             kind, subproperty = memory
             print(f"MEMORY Incorrect({subproperty})")
             correctness = "Incorrect"
+        elif gaps:
+            # Some access could not be verified, so this is not a proof of safety.
+            log("No memory-safety violation found, but the analysis was incomplete; "
+                "reporting Unknown rather than claiming safety.")
+            print("Unknown")
+            correctness = "Unknown"
         else:
             print("MEMORY Correct")
             correctness = "Correct"

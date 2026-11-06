@@ -16,6 +16,7 @@ from invariants import parse_source_location
 MEMORY_FINDINGS = (
     ("bufferoverflow", "valid-deref"),
     ("nulldereference", "valid-deref"),
+    ("invaliddereference", "valid-deref"),
     ("useafterfree", "valid-deref"),
     ("doublefree", "valid-free"),
     ("memoryleak", "valid-memtrack"),
