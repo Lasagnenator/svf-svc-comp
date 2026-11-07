@@ -116,12 +116,13 @@ def find_violation(source, prop_file_name, bits="64"):
 
         # -no-pie keeps addresses equal to those addr2line reads from the binary.
         command = [compiler, f"-m{bits}", "-w", "-std=gnu99", "-fcommon", "-O0", "-g", "-no-pie",
+                   "-msse2", "-mfpmath=sse",
                    "-finstrument-functions",
                    f"-DREACHED_ERROR={REACHED_ERROR}",
                    f"-DNONDET_CALLED={NONDET_CALLED}"]
         if memory:
             command.extend(["-fsanitize=address", "-fno-omit-frame-pointer"])
-        command.extend([source, STUBS, "-o", executable])
+        command.extend([source, STUBS, "-lm", "-o", executable])
 
         try:
             built = subprocess.run(command, capture_output=True, text=True, timeout=60)
