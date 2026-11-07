@@ -638,6 +638,25 @@ class TesterUnitTests(unittest.TestCase):
         killpg.assert_called_once_with(123, tester.signal.SIGKILL)
         self.assertEqual(run.return_value.communicate.call_args_list[0], mock.call(timeout=90))
 
+    def test_validator_defaults_to_cpachecker_when_installed(self):
+        args = SimpleNamespace(no_validate=False, validator_command=None)
+        command = tester.resolve_validator_command(args, {"CPACHECKER_HOME": "/opt/cpa"})
+        self.assertEqual(command, tester.DEFAULT_VALIDATOR_COMMAND)
+
+    def test_validator_is_none_without_cpachecker(self):
+        args = SimpleNamespace(no_validate=False, validator_command=None)
+        self.assertIsNone(tester.resolve_validator_command(args, {}))
+
+    def test_explicit_validator_command_overrides_default(self):
+        args = SimpleNamespace(no_validate=False, validator_command="other {witness}")
+        command = tester.resolve_validator_command(args, {"CPACHECKER_HOME": "/opt/cpa"})
+        self.assertEqual(command, "other {witness}")
+
+    def test_no_validate_disables_default_validator(self):
+        args = SimpleNamespace(no_validate=True, validator_command=None)
+        self.assertIsNone(
+            tester.resolve_validator_command(args, {"CPACHECKER_HOME": "/opt/cpa"}))
+
     def test_summary_reports_fraction_of_generated_witnesses(self):
         task = self.make_task("safe")
         results = [SimpleNamespace(
