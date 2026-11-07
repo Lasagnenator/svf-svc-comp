@@ -7,6 +7,7 @@ import tempfile
 import generate_witness
 import invariants
 import violations
+import concrete_run
 
 import nondet
 from util import *
@@ -19,7 +20,6 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
-    parser.add_argument("--verbose", "-v", action="store_true", help="display internals")
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
     parser.add_argument("--claim-violations", action="store_true",
                         help="report a violation whenever the abstract state says reach_error "
@@ -30,8 +30,9 @@ def main():
     parser.add_argument("c_file", help="input C file in SV-Comp format")
 
     args, extra = parser.parse_known_args()
-    log(f"Arguments: {args}")
-    log(f"Extra unknown arguments: {extra}")
+
+    log(f"Arguments: {args}", category=Log.SETUP)
+    log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
 
@@ -53,9 +54,9 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
     buffer.flush()
 
-    log("Generated file:")
+    log("Generated file:", category=Log.SETUP)
     buffer.seek(0)
-    log(buffer.read())
+    log(buffer.read(), category=Log.SETUP)
 
     # Compiles the C source file to LLVMIR
     working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
@@ -69,20 +70,28 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                "-o", working_file.name,]
     command.append(buffer.name)
 
-    log(f"Running clang with command: {' '.join(command)}")
-    retcode = subprocess.run(command).returncode
+    log(f"Running clang with command: {' '.join(command)}", category=Log.SETUP)
+    # Capture clang's output: its warnings are noise on success but needed on failure.
+    clang = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    retcode = clang.returncode
     buffer.close()
-    log(f"Clang exitted with code {retcode}.")
+    log(f"Clang exitted with code {retcode}.", category=Log.SETUP)
 
     if retcode != 0:
+        log(clang.stderr)
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
         working_file.close()
         fail("ERROR(CLANG)", retcode)
+    log(clang.stderr, category=Log.SETUP)
 
 
     try:
         # This code is copied from python/test-ae.py to use SVF
-        pysvf.buildSVFModule(working_file.name)
+        svf_args = [working_file.name]
+
+        svf_args.append("-stat=true")
+
+        pysvf.buildSVFModule(svf_args)
         pag = pysvf.getPAG()
     except Exception as e:
         log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
@@ -97,11 +106,35 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     # ae first
     try:
         ae = AbstractExecution(pag)
+        # Memory verdicts are Unknown on any gap, so stop at a dropped call instead of running on.
+        ae.stop_on_gap = prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp')
         ae.analyse()
-        log(ae.results)
+        log(ae.results, category=Log.TRACE)
+    except AnalysisIncomplete as e:
+        log(f"Memory analysis inconclusive, stopped at: {e}.")
+        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                              input_line_count, witness_file_path, witness_format, bits):
+            log("Reporting Unknown.")
+            print("Unknown")
+        working_file.close()
+        pysvf.releasePAG()
+        return
+    except UnknownException:
+        # An operation the analysis does not support, so it cannot give a verdict.
+        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                              input_line_count, witness_file_path, witness_format, bits):
+            print("Unknown")
+        working_file.close()
+        pysvf.releasePAG()
+        return
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
+        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                          input_line_count, witness_file_path, witness_format, bits):
+            working_file.close()
+            pysvf.releasePAG()
+            return
         working_file.close()
         fail("ERROR(AE)")
 
@@ -113,12 +146,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                 feasible_ids.add(callNode.getId())
 
         # CFL is a log-only cross-check: its 2-frame stack cannot prove safety or veto a finding.
-        log("Running CFL reachability analysis...")
+        log("Running CFL reachability analysis...", category=Log.REACH)
         cfl = CFLreachability(pag)
         cfl_results = cfl.analyze()
         cfl_ids = {n.getId() for ok, n in cfl_results.get("reach", []) if ok and n is not None}
 
+        # Only dropped paths are gaps here. Possible memory errors are for the memory
+        # properties: reach tasks are assumed free of undefined behaviour.
         gaps = list(ae.results.get("incomplete", []))
+        ignored = (len(ae.results.get("memory_gaps", []))
+                   + len(ae.results.get("global_memory_gaps", [])))
+        if ignored:
+            log(f"Ignored {ignored} memory gap(s) for reachability", category=Log.REACH)
 
         ###SVF SV-COMP-ADDITION
         # An empty reach list is ambiguous: a never-visited site is a coverage gap, not a proof.
@@ -142,38 +181,50 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             holder = n.getFun().getName() if n.getFun() else None
             if holder is None or holder not in analysed:
                 unreached.add(n.getId())
-        log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}")
-        log(f"AE visited reach_error sites  : {sorted(visited_sites)}")
+        log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
+        log(f"AE visited reach_error sites  : {sorted(visited_sites)}", category=Log.REACH)
         if unreached:
             gaps.append(f"reach_error sites in functions the analysis never entered: "
                         f"{sorted(unreached)}")
 
-        log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}")
-        log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}")
-        log(f"Coverage gaps recorded: {len(gaps)}")
+        log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}", category=Log.REACH)
+        log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}", category=Log.REACH)
+        log(f"Coverage gaps recorded: {len(gaps)}", category=Log.REACH)
         for reason in sorted(set(gaps))[:25]:
-            log(f"  gap: {reason}")
+            log(f"  gap: {reason}", category=Log.REACH)
 
         if feasible_ids:
             if claim_violations:
-                print("REACH Incorrect")
+                verdict = "REACH Incorrect"
                 correctness = "Incorrect"
             else:
                 # Abstract feasibility is not a concrete path, and the witness carries no trace to confirm it.
                 log("reach_error may be reachable, but nothing proves a concrete path "
                     "gets there; reporting Unknown rather than claiming a violation.")
-                print("Unknown")
+                verdict = "Unknown"
                 correctness = "Unknown"
         elif gaps:
             # Paths were dropped somewhere, so this is not a proof of safety.
             log("No feasible reach_error, but the analysis was incomplete; "
                 "reporting Unknown rather than claiming safety.")
-            print("Unknown")
+            verdict = "Unknown"
             correctness = "Unknown"
         else:
-            print("REACH Correct")
+            verdict = "REACH Correct"
             correctness = "Correct"
             
+    elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
+            ae.results.get("incomplete") or ae.results.get("memory_gaps")
+            or ae.results.get("global_memory_gaps")):
+        # Dropped paths or unproven memory errors: neither safety nor a violation is shown.
+        gaps = (ae.results.get("incomplete", []) + ae.results.get("memory_gaps", [])
+                + ae.results.get("global_memory_gaps", []))
+        log(f"Memory analysis inconclusive ({len(gaps)} gap(s)); reporting Unknown.")
+        for reason in sorted(set(gaps))[:25]:
+            log(f"  gap: {reason}", category=Log.MEMORY)
+        verdict = "Unknown"
+        correctness = "Unknown"
+
     elif prop_file_name == 'valid-memsafety.prp':
         # This property file bundles valid-deref, valid-free, and valid-memtrack.
         # violations.MEMORY_FINDINGS checks our arrays in order and maps each to the
@@ -185,39 +236,52 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             log(f"  gap: {reason}")
         if memory:
             kind, subproperty = memory
-            print(f"MEMORY Incorrect({subproperty})")
+            verdict = f"MEMORY Incorrect({subproperty})"
             correctness = "Incorrect"
         elif gaps:
             # Some access could not be verified, so this is not a proof of safety.
             log("No memory-safety violation found, but the analysis was incomplete; "
                 "reporting Unknown rather than claiming safety.")
-            print("Unknown")
+            verdict = "Unknown"
             correctness = "Unknown"
         else:
-            print("MEMORY Correct")
+            verdict = "MEMORY Correct"
             correctness = "Correct"
 
     elif prop_file_name == 'valid-memcleanup.prp':
         # Memcleanup requires all memory to be explicitly freed before exit.
         # Our memory leak detector at the end of main() handles this perfectly.
         if len(ae.results.get("memoryleak", [])) > 0:
-            print("CLEANUP Incorrect")
+            verdict = "CLEANUP Incorrect"
             correctness = "Incorrect"
         else:
-            print("CLEANUP Correct")
+            verdict = "CLEANUP Correct"
             correctness = "Correct"
 
     else:
         # Unsupported category.
-        print("Unknown")
+        verdict = "Unknown"
         correctness = "Unknown"
+
+    # The abstract execution over-approximates, so only its TRUE is a proof. A FALSE or
+    # Unknown is a hunch, which a concrete run can confirm. A clean run proves nothing,
+    # so AE's verdict stands.
+    # TODO: Pass AE's state so the run can use AE-guided nondet values (see concrete_run.py).
+    if correctness != "Correct":
+        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                          input_line_count, witness_file_path, witness_format, bits):
+            working_file.close()
+            pysvf.releasePAG()
+            return
+
+    print(verdict)
 
     if "Correct" in correctness and "Incorrect" not in correctness:
         with open(prop_file_path) as f:
             spec = f.read().strip()
         loop_invariants = invariants.extract_loop_invariants(
             ae, pag, input_file_path, input_line_count)
-        log(f"Exported {len(loop_invariants)} loop invariant(s).")
+        log(f"Exported {len(loop_invariants)} loop invariant(s).", category=Log.SETUP)
         generate_witness.write_witness(
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
             'ILP32' if bits == "32" else 'LP64')
@@ -246,10 +310,51 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         except ValueError as e:
             log(f"No violation witness: {e}")
     else:
-        log(f"No witness for result: {correctness}")
+        # violation_sequence not implemented yet; produce nothing
+        log(f"No witness for result: {correctness}", category=Log.SETUP)
 
     working_file.close()
     pysvf.releasePAG()
+
+
+def tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                   input_line_count, witness_file_path, witness_format, bits):
+    # Run the task once. If the run shows a violation, report it and return True.
+    violation = concrete_run.find_violation(input_file_path, prop_file_name, bits)
+    if violation is None:
+        return False
+    reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
+                            input_line_count, witness_file_path, witness_format, bits)
+    return True
+
+
+def reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
+                            input_line_count, witness_file_path, witness_format, bits):
+    """Print the FALSE verdict for a violation a concrete run showed, and its witness."""
+    subproperty = violation["subproperty"]
+    log(f"Concrete run violated {subproperty} at line {violation.get('line')}.")
+    if prop_file_name == 'unreach-call.prp':
+        print("REACH Incorrect")
+    elif prop_file_name == 'valid-memsafety.prp':
+        print(f"MEMORY Incorrect({subproperty})")
+    else:
+        print("CLEANUP Incorrect")
+
+    with open(prop_file_path) as f:
+        spec = f.read().strip()
+    if prop_file_name == 'valid-memsafety.prp':
+        spec = violations.specification_for(spec, subproperty)
+    segments = violations.concrete_segments(
+        violation, violations.main_exit(pag), input_file_path, input_line_count)
+    try:
+        if segments is None:
+            raise ValueError("the run gave no usable source location")
+        generate_witness.write_violation_witness(
+            segments, [input_file_path], spec, witness_file_path, witness_format,
+            'ILP32' if bits == "32" else 'LP64')
+        log(f"Exported a violation witness with {len(segments)} segment(s).")
+    except ValueError as e:
+        log(f"No violation witness: {e}")
 
 
 if __name__ == "__main__":

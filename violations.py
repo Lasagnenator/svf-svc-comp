@@ -119,3 +119,24 @@ def memory_segments(findings, exit_node, file_name, max_line=None):
     if len(sites) < len(findings) and exit_node is not None:
         sites.extend(edge.getSrcNode() for edge in exit_node.getInEdges())
     return _target([(False, site) for site in sites], file_name, max_line)
+
+
+def concrete_segments(violation, exit_node, file_name, max_line=None):
+    """Return the segments of a violation witness for a violation seen in a concrete run
+
+    The run calls no nondet function, so the path needs no waypoints, only the target.
+    A leak targets main's exit, as for the abstract execution's leaks; anything else
+    targets the line the run reported.
+    """
+    if violation["subproperty"] == "valid-memtrack":
+        if exit_node is None:
+            return None
+        return _target([(False, edge.getSrcNode()) for edge in exit_node.getInEdges()],
+                       file_name, max_line)
+    line = violation.get("line")
+    if line is None or (max_line is not None and line > max_line):
+        return None
+    target = {"type": "target", "file_name": file_name, "line": line}
+    if violation.get("function"):
+        target["function"] = violation["function"]
+    return [[target]]
