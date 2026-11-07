@@ -2445,9 +2445,9 @@ class AbstractExecution:
             else:
                 return AddressValue(self.getVirtualMemAddress(var_id))
         except UnknownException as e:
-            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}.")
             log_exception(e)
-            fail("Unknown", 0)
+            raise
 
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
@@ -3248,9 +3248,9 @@ class AbstractExecution:
             abstract_state[lhs] = AbstractValue(result)
             ptr_offsets.pop(lhs, None)
         except UnknownException as e:
-            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}.")
             log_exception(e)
-            fail("Unknown", 0)
+            raise
 
 
     def loadAbstractValue(self, load: pysvf.LoadStmt) -> pysvf.AbstractValue:

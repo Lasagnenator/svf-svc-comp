@@ -7,6 +7,7 @@ import tempfile
 import generate_witness
 import invariants
 import violations
+import concrete_run
 
 import nondet
 from util import *
@@ -110,14 +111,30 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         ae.analyse()
         log(ae.results, category=Log.TRACE)
     except AnalysisIncomplete as e:
-        log(f"Memory analysis inconclusive, stopped at: {e}; reporting Unknown.")
-        print("Unknown")
+        log(f"Memory analysis inconclusive, stopped at: {e}.")
+        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                              input_line_count, witness_file_path, witness_format, bits):
+            log("Reporting Unknown.")
+            print("Unknown")
+        working_file.close()
+        pysvf.releasePAG()
+        return
+    except UnknownException:
+        # An operation the analysis does not support, so it cannot give a verdict.
+        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                              input_line_count, witness_file_path, witness_format, bits):
+            print("Unknown")
         working_file.close()
         pysvf.releasePAG()
         return
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
+        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                          input_line_count, witness_file_path, witness_format, bits):
+            working_file.close()
+            pysvf.releasePAG()
+            return
         working_file.close()
         fail("ERROR(AE)")
 
@@ -178,22 +195,22 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
         if feasible_ids:
             if claim_violations:
-                print("REACH Incorrect")
+                verdict = "REACH Incorrect"
                 correctness = "Incorrect"
             else:
                 # Abstract feasibility is not a concrete path, and the witness carries no trace to confirm it.
                 log("reach_error may be reachable, but nothing proves a concrete path "
                     "gets there; reporting Unknown rather than claiming a violation.")
-                print("Unknown")
+                verdict = "Unknown"
                 correctness = "Unknown"
         elif gaps:
             # Paths were dropped somewhere, so this is not a proof of safety.
             log("No feasible reach_error, but the analysis was incomplete; "
                 "reporting Unknown rather than claiming safety.")
-            print("Unknown")
+            verdict = "Unknown"
             correctness = "Unknown"
         else:
-            print("REACH Correct")
+            verdict = "REACH Correct"
             correctness = "Correct"
             
     elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
@@ -205,7 +222,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log(f"Memory analysis inconclusive ({len(gaps)} gap(s)); reporting Unknown.")
         for reason in sorted(set(gaps))[:25]:
             log(f"  gap: {reason}", category=Log.MEMORY)
-        print("Unknown")
+        verdict = "Unknown"
         correctness = "Unknown"
 
     elif prop_file_name == 'valid-memsafety.prp':
@@ -219,32 +236,45 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             log(f"  gap: {reason}")
         if memory:
             kind, subproperty = memory
-            print(f"MEMORY Incorrect({subproperty})")
+            verdict = f"MEMORY Incorrect({subproperty})"
             correctness = "Incorrect"
         elif gaps:
             # Some access could not be verified, so this is not a proof of safety.
             log("No memory-safety violation found, but the analysis was incomplete; "
                 "reporting Unknown rather than claiming safety.")
-            print("Unknown")
+            verdict = "Unknown"
             correctness = "Unknown"
         else:
-            print("MEMORY Correct")
+            verdict = "MEMORY Correct"
             correctness = "Correct"
 
     elif prop_file_name == 'valid-memcleanup.prp':
         # Memcleanup requires all memory to be explicitly freed before exit.
         # Our memory leak detector at the end of main() handles this perfectly.
         if len(ae.results.get("memoryleak", [])) > 0:
-            print("CLEANUP Incorrect")
+            verdict = "CLEANUP Incorrect"
             correctness = "Incorrect"
         else:
-            print("CLEANUP Correct")
+            verdict = "CLEANUP Correct"
             correctness = "Correct"
 
     else:
         # Unsupported category.
-        print("Unknown")
+        verdict = "Unknown"
         correctness = "Unknown"
+
+    # The abstract execution over-approximates, so only its TRUE is a proof. A FALSE or
+    # Unknown is a hunch, which a concrete run can confirm. A clean run proves nothing,
+    # so AE's verdict stands.
+    # TODO: Pass AE's state so the run can use AE-guided nondet values (see concrete_run.py).
+    if correctness != "Correct":
+        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                          input_line_count, witness_file_path, witness_format, bits):
+            working_file.close()
+            pysvf.releasePAG()
+            return
+
+    print(verdict)
 
     if "Correct" in correctness and "Incorrect" not in correctness:
         with open(prop_file_path) as f:
@@ -285,6 +315,46 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
     working_file.close()
     pysvf.releasePAG()
+
+
+def tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
+                   input_line_count, witness_file_path, witness_format, bits):
+    # Run the task once. If the run shows a violation, report it and return True.
+    violation = concrete_run.find_violation(input_file_path, prop_file_name, bits)
+    if violation is None:
+        return False
+    reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
+                            input_line_count, witness_file_path, witness_format, bits)
+    return True
+
+
+def reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
+                            input_line_count, witness_file_path, witness_format, bits):
+    """Print the FALSE verdict for a violation a concrete run showed, and its witness."""
+    subproperty = violation["subproperty"]
+    log(f"Concrete run violated {subproperty} at line {violation.get('line')}.")
+    if prop_file_name == 'unreach-call.prp':
+        print("REACH Incorrect")
+    elif prop_file_name == 'valid-memsafety.prp':
+        print(f"MEMORY Incorrect({subproperty})")
+    else:
+        print("CLEANUP Incorrect")
+
+    with open(prop_file_path) as f:
+        spec = f.read().strip()
+    if prop_file_name == 'valid-memsafety.prp':
+        spec = violations.specification_for(spec, subproperty)
+    segments = violations.concrete_segments(
+        violation, violations.main_exit(pag), input_file_path, input_line_count)
+    try:
+        if segments is None:
+            raise ValueError("the run gave no usable source location")
+        generate_witness.write_violation_witness(
+            segments, [input_file_path], spec, witness_file_path, witness_format,
+            'ILP32' if bits == "32" else 'LP64')
+        log(f"Exported a violation witness with {len(segments)} segment(s).")
+    except ValueError as e:
+        log(f"No violation witness: {e}")
 
 
 if __name__ == "__main__":
