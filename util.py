@@ -3,7 +3,7 @@ import sys
 import traceback
 from typing import NoReturn
 
-VERSION = "2.5"
+VERSION = "2.6"
 
 def get_real_path(relative):
     # Find the real path given a path relative to the current file
