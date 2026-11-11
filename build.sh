@@ -15,8 +15,6 @@ runtime_files=(
     svf_run.py
     util.py
     violations.py
-    concrete_run.py
-    concrete_stubs.c
     LICENSE.TXT
     README.md
     smoketest.sh

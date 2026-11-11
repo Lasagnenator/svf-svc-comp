@@ -37,7 +37,7 @@ CMD ["/usr/sbin/sshd", "-D"]
 
 
 # Define dependencies.
-ENV lib_deps="clang-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential gcc-multilib libssl-dev libpcre2-dev zip libzstd-dev"
+ENV lib_deps="clang-21 git zlib1g-dev libncurses-dev libtinfo6 build-essential libssl-dev libpcre2-dev zip libzstd-dev"
 ENV build_deps="wget xz-utils git gdb tcl software-properties-common"
 ENV runtime="python3 python3-venv"
 
@@ -62,9 +62,4 @@ COPY --chown=svf:svf . .
 # Build-time check to see that things probably are working
 USER svf
 RUN python -c "import pysvf, yaml"
-RUN printf '#include <stdlib.h>\nint main(void) { free(malloc(1)); return 0; }\n' > /tmp/asan.c \
-    && gcc -m64 -fsanitize=address -g /tmp/asan.c -o /tmp/asan64 && /tmp/asan64 \
-    && gcc -m32 -fsanitize=address -g /tmp/asan.c -o /tmp/asan32 && /tmp/asan32 \
-    && command -v addr2line \
-    && rm /tmp/asan.c /tmp/asan64 /tmp/asan32
 USER root

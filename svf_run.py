@@ -7,7 +7,6 @@ import tempfile
 import generate_witness
 import invariants
 import violations
-import concrete_run
 
 import nondet
 from util import *
@@ -111,30 +110,20 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         ae.analyse()
         log(ae.results, category=Log.TRACE)
     except AnalysisIncomplete as e:
-        log(f"Memory analysis inconclusive, stopped at: {e}.")
-        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
-                              input_line_count, witness_file_path, witness_format, bits):
-            log("Reporting Unknown.")
-            print("Unknown")
+        log(f"Memory analysis inconclusive, stopped at: {e}; reporting Unknown.")
+        print("Unknown")
         working_file.close()
         pysvf.releasePAG()
         return
     except UnknownException:
         # An operation the analysis does not support, so it cannot give a verdict.
-        if not tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
-                              input_line_count, witness_file_path, witness_format, bits):
-            print("Unknown")
+        print("Unknown")
         working_file.close()
         pysvf.releasePAG()
         return
     except Exception as e:
         log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
         log_exception(e)
-        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
-                          input_line_count, witness_file_path, witness_format, bits):
-            working_file.close()
-            pysvf.releasePAG()
-            return
         working_file.close()
         fail("ERROR(AE)")
 
@@ -263,17 +252,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         verdict = "Unknown"
         correctness = "Unknown"
 
-    # The abstract execution over-approximates, so only its TRUE is a proof. A FALSE or
-    # Unknown is a hunch, which a concrete run can confirm. A clean run proves nothing,
-    # so AE's verdict stands.
-    # TODO: Pass AE's state so the run can use AE-guided nondet values (see concrete_run.py).
-    if correctness != "Correct":
-        if tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
-                          input_line_count, witness_file_path, witness_format, bits):
-            working_file.close()
-            pysvf.releasePAG()
-            return
-
     print(verdict)
 
     if "Correct" in correctness and "Incorrect" not in correctness:
@@ -315,46 +293,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
     working_file.close()
     pysvf.releasePAG()
-
-
-def tryConcreteRun(pag, prop_file_name, prop_file_path, input_file_path,
-                   input_line_count, witness_file_path, witness_format, bits):
-    # Run the task once. If the run shows a violation, report it and return True.
-    violation = concrete_run.find_violation(input_file_path, prop_file_name, bits)
-    if violation is None:
-        return False
-    reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
-                            input_line_count, witness_file_path, witness_format, bits)
-    return True
-
-
-def reportConcreteViolation(violation, pag, prop_file_name, prop_file_path, input_file_path,
-                            input_line_count, witness_file_path, witness_format, bits):
-    """Print the FALSE verdict for a violation a concrete run showed, and its witness."""
-    subproperty = violation["subproperty"]
-    log(f"Concrete run violated {subproperty} at line {violation.get('line')}.")
-    if prop_file_name == 'unreach-call.prp':
-        print("REACH Incorrect")
-    elif prop_file_name == 'valid-memsafety.prp':
-        print(f"MEMORY Incorrect({subproperty})")
-    else:
-        print("CLEANUP Incorrect")
-
-    with open(prop_file_path) as f:
-        spec = f.read().strip()
-    if prop_file_name == 'valid-memsafety.prp':
-        spec = violations.specification_for(spec, subproperty)
-    segments = violations.concrete_segments(
-        violation, violations.main_exit(pag), input_file_path, input_line_count)
-    try:
-        if segments is None:
-            raise ValueError("the run gave no usable source location")
-        generate_witness.write_violation_witness(
-            segments, [input_file_path], spec, witness_file_path, witness_format,
-            'ILP32' if bits == "32" else 'LP64')
-        log(f"Exported a violation witness with {len(segments)} segment(s).")
-    except ValueError as e:
-        log(f"No violation witness: {e}")
 
 
 if __name__ == "__main__":
