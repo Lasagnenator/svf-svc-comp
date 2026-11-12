@@ -8,6 +8,7 @@ import generate_witness
 import invariants
 import violations
 import re
+import importlib.metadata
 
 import nondet
 from util import *
@@ -31,6 +32,8 @@ def main():
 
     args, extra = parser.parse_known_args()
 
+    log(f"SVf-SVC Version {VERSION}", category=Log.SETUP)
+    log(f"PySVF Version {importlib.metadata.version('pysvf')}", category=Log.SETUP)
     log(f"Arguments: {args}", category=Log.SETUP)
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
