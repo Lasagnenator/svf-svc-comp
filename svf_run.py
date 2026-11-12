@@ -8,16 +8,11 @@ import generate_witness
 import invariants
 import violations
 import re
-import sys
 
 import nondet
 from util import *
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
-
-# The AE walks the WTO recursively, one frame per node on the longest path, so large
-# programs go past Python's default limit of 1000 frames.
-sys.setrecursionlimit(20_000)
 
 def main():
     # this implementation just accepts the file to do testing on
