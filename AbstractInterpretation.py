@@ -38,6 +38,9 @@ class UnknownException(Exception):
     def __str__(self) -> str:
         return self.msg
 
+class AnalysisIncomplete(Exception):
+    """The verdict can only be Unknown, so the analysis stops early."""
+
 class WTOCycleDepth:
     def __init__(self):
         self._heads: List[ICFGNode] = []
@@ -285,20 +288,20 @@ class AbstractExecutionHelper:
         
         total_bugs = len(self.node_to_bug_info)
         if total_bugs == 0:
-            log("No memory safety violations detected. Program is safe!")
-            log("=======================================================\n")
+            log("No memory safety violations detected. Program is safe!", category=Log.MEMORY)
+            log("=======================================================\n", category=Log.MEMORY)
             return
 
-        log(f"Total Memory Safety Violations Found: {total_bugs}\n")
-
+        log(f"Total Memory Safety Violations Found: {total_bugs}\n", category=Log.MEMORY)
+        
         for category, reports in self.bug_reports.items():
             if len(reports) > 0:
-                log(f"###################### {category} ({len(reports)} found) ######################")
-                log("---------------------------------------------")
+                log(f"###################### {category} ({len(reports)} found) ######################", category=Log.MEMORY)
+                log("---------------------------------------------", category=Log.MEMORY)
                 for node, msg in reports:
-                    log(f"{node}: {msg}")
-                    log("---------------------------------------------")
-                log("")
+                    log(f"{node}: {msg}", category=Log.MEMORY)
+                    log("---------------------------------------------", category=Log.MEMORY)
+                log("", category=Log.MEMORY)
 
 
     def updateGepObjOffsetFromBase(self, abstractState: pysvf.AbstractState, gepAddrs: pysvf.AddressValue, objAddrs: pysvf.AddressValue, offset: pysvf.IntervalValue):
@@ -538,6 +541,12 @@ class AbstractExecution:
 
         # Stores dropped paths
         self.results["incomplete"] = []
+        # Stores possible (unproven) memory errors
+        self.results["memory_gaps"] = []
+        # Possible memory errors in global initialisers, kept apart so reachability can ignore them
+        self.results["global_memory_gaps"] = []
+        # Set by svf_run for memory properties, where any gap already means Unknown
+        self.stop_on_gap = False
         # Functions actually entered
         self.visited = set()
         # Nodes handleICFGNode visited and proved infeasible.
@@ -1347,6 +1356,8 @@ class AbstractExecution:
         for block in self.orphan_nodes:
             if block in self.post_abs_trace:
                 continue  # a later iteration gave it a state after all
+            if isinstance(block, pysvf.RetICFGNode) and block.getCallICFGNode() in self.unreachable_nodes:
+                continue
             pending = [edge.getSrcNode() for edge in block.getInEdges()
                        if edge.getSrcNode() not in self.post_abs_trace
                        and edge.getSrcNode() not in self.unreachable_nodes]
@@ -1357,6 +1368,20 @@ class AbstractExecution:
     def recordGap(self, reason: str):
         """Record that the analysis gave up"""
         self.results["incomplete"].append(reason)
+
+    def recordMemoryGap(self, reason: str, node: pysvf.ICFGNode = None):
+        """Record a memory error that may happen but is not proven"""
+        # Global initialisers are compiler-generated constants, so a gap there comes from
+        # lost offsets rather than from the program's own memory accesses.
+        if node is not None and node.getId() == self.icfg.getGlobalICFGNode().getId():
+            self.results["global_memory_gaps"].append(reason)
+        else:
+            self.results["memory_gaps"].append(reason)
+
+    def stopIfMemoryRun(self):
+        """Stop at a dropped call in a memory run: its verdict is already Unknown."""
+        if self.stop_on_gap:
+            raise AnalysisIncomplete(self.results["incomplete"][-1])
 
     def markCallNeverReturns(self, node: pysvf.CallICFGNode):
         """The callee cannot return, so the code after the call is unreachable, not missing."""
@@ -1400,6 +1425,24 @@ class AbstractExecution:
         self.skipped_alloc_states[ret] = (
             self.node_to_alloc_state.get(node, {}).copy()
         )
+
+    def restageSkippedCall(self, node: pysvf.ICFGNode):
+        """Refresh a skipped call's staged ret state after widening/narrowing at a loop head,
+        so the loop body sees the widened state instead of the first iteration's.
+        """
+        if not isinstance(node, pysvf.CallICFGNode):
+            return
+        ret = node.getRetICFGNode()
+        if ret is None or ret not in self.skipped_states:
+            return
+        actual_ret = ret.getActualRet()
+        staged = self.skipped_states[ret]
+        ret_val = None
+        if actual_ret is not None and staged.inVarToValTable(actual_ret.getId()):
+            ret_val = staged[actual_ret.getId()].clone()
+        self.resumeAfterUnanalysedCall(node)
+        if ret_val is not None:
+            self.skipped_states[ret][actual_ret.getId()] = ret_val
 
     def cmpVarBehind(self, var, depth: int = 4):
         """Walk back through value-preserving copies to the comparison that produced `var`.
@@ -1482,8 +1525,7 @@ class AbstractExecution:
 
         # Handle Direct Calls
         fun_name = callee.getName()
-        log(fun_name)
-
+        
         # Narrow the caller before the body is walked; the body is then analysed as usual,
         # because the return node takes its state from the callee's exit.
         if fun_name in self.ASSUME_HELPERS and not self.applyAssumption(node):
@@ -1505,7 +1547,7 @@ class AbstractExecution:
                 elif fun_name in ("__VERIFIER_nondet_short",):
                     self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue(-32768, 32767))
                 elif fun_name in ("__VERIFIER_nondet_uint", "__VERIFIER_nondet_ulong", "__VERIFIER_nondet_size_t"):
-                    self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue(0, pysvf.Options.max_field_limit()))
+                    self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
                 else:
                     self.post_abs_trace[node][lhs_id] = AbstractValue(IntervalValue.top())
             self.resumeAfterUnanalysedCall(node)
@@ -1616,15 +1658,13 @@ class AbstractExecution:
 
             # Check if the interval for the argument is infinite
             if abstract_state[arg0].getInterval().isTop():
-                log(f"svf_assert Fail. {callNode}")
-                assert False
+                raise AssertionError(f"svf_assert Fail. {callNode}")
             else:
                 if (abstract_state[arg0].getInterval().equals(IntervalValue(1, 1)) or
                         abstract_state[arg0].getInterval().equals(IntervalValue(-1, -1))):
-                    log(f"The assertion ({callNode}) is successfully verified!!")
+                    log(f"The assertion ({callNode}) is successfully verified!!", category=Log.TRACE)
                 else:
-                    log(f"The assertion ({callNode}) is unsatisfiable!!")
-                    assert False
+                    raise AssertionError(f"The assertion ({callNode}) is unsatisfiable!!")
 
         elif callNode.getCalledFunction().getName() == "OVERFLOW":
             # If the condition is false, the program is infeasible
@@ -1650,15 +1690,14 @@ class AbstractExecution:
                                 + access_offset >= size
                         )
                         if overflow:
-                            log("obj len: {}, you want to access: {}.".format(size, access_offset))
+                            log("obj len: {}, you want to access: {}.".format(size, access_offset), category=Log.MEMORY)
                     else:
                         raise AssertionError("Pointer not found in gepObjOffsetFromBase")
 
                 if overflow:
-                    log("Your implementation successfully detected the buffer overflow")
+                    log("Your implementation successfully detected the buffer overflow", category=Log.MEMORY)
                 else:
-                    log(f"Your implementation failed to detect the buffer overflow! {callNode}")
-                    assert False
+                    raise AssertionError(f"Your implementation failed to detect the buffer overflow! {callNode}")
             else:
                 log(f"Your implementation failed to detect the buffer overflow! {callNode}")
                 assert False
@@ -1903,6 +1942,7 @@ class AbstractExecution:
             in_edge_num += 1
 
         if in_edge_num == 0:
+            log(f"No predecessors for block {block.getId()}", category=Log.TRACE)
             if unanalysed_preds:
                 self.orphan_nodes.add(block)
             return (False, None)
@@ -2045,11 +2085,13 @@ class AbstractExecution:
                                 and off0.getInterval().equals(off1.getInterval())
                             ):
                                 return False
-                    else:
-                        return False
-                        
+
             # Pointer Offset Narrowing for Pointer Comparisons (e.g. ptr1 < ptr2) ---
-            if node in self.post_ptr_offset_trace:
+            # skip unless both point to the same single object
+            same_object = (v0.isAddr() and v1.isAddr() and len(v0.getAddrs()) == 1
+                           and set(v0.getAddrs()) == set(v1.getAddrs()))
+            
+            if same_object and node in self.post_ptr_offset_trace:
                 ptr_offsets = self.post_ptr_offset_trace[node]
                 off0 = ptr_offsets.get(id0)
                 off1 = ptr_offsets.get(id1)
@@ -2279,10 +2321,6 @@ class AbstractExecution:
                     if (n.getICFGNode() if isinstance(n, pysvf.SVFStmt) else n) in self.post_abs_trace
                     and (n.getICFGNode() if isinstance(n, pysvf.SVFStmt) else n) not in self.infeasible_nodes
                 ]
-            self.results["reach"] = [
-                (feas, n) for (feas, n) in self.results["reach"]
-                if feas and n in self.post_abs_trace and n not in self.infeasible_nodes
-            ]
 
             #Memory Leak Detection at Program Exit
             main_exit = None
@@ -2308,7 +2346,7 @@ class AbstractExecution:
                         self.buf_overflow_helper.reportMemoryLeak(main_exit, msg)
                         self.results["memoryleak"].append(obj_id)
                     elif lifetime == Lifetime.MAY_FREED:
-                        self.recordGap(f"Object {obj_id} may be leaked (MAY_FREED at exit)")
+                        self.recordMemoryGap(f"Object {obj_id} may be leaked (MAY_FREED at exit)")
             else:
                 log("Warning: Could not locate the exit node for the main function.")
         else:
@@ -2355,7 +2393,7 @@ class AbstractExecution:
         elif isinstance(stmt, pysvf.UnaryOPStmt) or isinstance(stmt, pysvf.BranchStmt):
             pass
         else:
-            assert False , "Unhandled statement type"
+            raise AssertionError("Unhandled statement type")
 
     """
     Initialize an object variable in the abstract state.
@@ -2407,9 +2445,9 @@ class AbstractExecution:
             else:
                 return AddressValue(self.getVirtualMemAddress(var_id))
         except UnknownException as e:
-            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}.")
             log_exception(e)
-            fail("Unknown", 0)
+            raise
 
 
     def updateStateOnAddr(self, addr: pysvf.AddrStmt):
@@ -2692,9 +2730,9 @@ class AbstractExecution:
         rhs_id = ret.getRHSVarID()
         lhs_id = ret.getLHSVarID()
         
-        # Propagate Return Value
-        val = abstract_state.getVar(rhs_id)
-        abstract_state[lhs_id] = val.clone()
+        # Propagate Return Value. An unanalysed callee (e.g. a nondet stub) has no return value.
+        if abstract_state.inVarToValTable(rhs_id) or abstract_state.inVarToAddrsTable(rhs_id):
+            abstract_state[lhs_id] = abstract_state.getVar(rhs_id).clone()
         self.setPointerInitState(
             node, lhs_id, self.pointerInitState(node, rhs_id)
         )
@@ -3210,9 +3248,9 @@ class AbstractExecution:
             abstract_state[lhs] = AbstractValue(result)
             ptr_offsets.pop(lhs, None)
         except UnknownException as e:
-            log(f"pysvf: Unsupported operation with {repr(e)}. SVF-SVC will fail.")
+            log(f"pysvf: Unsupported operation with {repr(e)}.")
             log_exception(e)
-            fail("Unknown", 0)
+            raise
 
 
     def loadAbstractValue(self, load: pysvf.LoadStmt) -> pysvf.AbstractValue:
@@ -3293,7 +3331,7 @@ class AbstractExecution:
         if copy.isZext() and rhs_val.isInterval():
             iv = rhs_val.getInterval()
             if not iv.isBottom() and iv.lb() < pysvf.BoundedInt(0):
-                abstract_state[lhs] = AbstractValue(IntervalValue(0, pysvf.Options.max_field_limit()))
+                abstract_state[lhs] = AbstractValue(IntervalValue.top())
             else:
                 abstract_state[lhs] = rhs_val.clone()
         elif not (copy.isZext() or copy.isSext() or copy.isValueCopy()) and rhs_val.isInterval():
@@ -3468,10 +3506,11 @@ class AbstractExecution:
                 # Dynamic array fallback check (VLA / mallocs with unknown size)
                 if size_iv is None or size_iv.isTop():
                     must_overflow = False
-                    self.recordGap(
+                    self.recordMemoryGap(
                         f"Cannot verify access to dynamically sized object "
                         f"{base_obj.getId()} at node {node.getId()}; "
-                        f"pointer offset is {current_offset}"
+                        f"pointer offset is {current_offset}",
+                        node,
                     )
                     continue
 
@@ -3510,7 +3549,7 @@ class AbstractExecution:
             if node not in self.results["bufferoverflow"]:
                 self.results["bufferoverflow"].append(node)
         elif may_overflow:
-            self.recordGap(f"May buffer overflow at node {node.getId()} with offset {current_offset}")
+            self.recordMemoryGap(f"May buffer overflow at node {node.getId()} with offset {current_offset}", node)
 
     def bufOverflowDetection(self, stmt: pysvf.SVFStmt):
         if not isinstance(stmt.getICFGNode(), pysvf.CallICFGNode):
@@ -3808,7 +3847,7 @@ class AbstractExecution:
                 self.results["badfree"].append(node)
             return
         elif offset.isTop() or int(offset.lb()) != 0 or int(offset.ub()) != 0:
-            self.recordGap(f"May bad free at offset {offset}")
+            self.recordMemoryGap(f"May bad free at offset {offset}")
             return
 
         if not arg_val.isAddr():
@@ -3828,7 +3867,7 @@ class AbstractExecution:
                     if node not in self.results["badfree"]:
                         self.results["badfree"].append(node)
                 else:
-                    self.recordGap(f"May free non-heap address {addr}")
+                    self.recordMemoryGap(f"May free non-heap address {addr}")
                 continue
 
             lifetime = lifetime_state.get(base_obj.getId(), Lifetime.ALLOCATED)
@@ -3839,9 +3878,9 @@ class AbstractExecution:
                     if node not in self.results["doublefree"]:
                         self.results["doublefree"].append(node)
                 else:
-                    self.recordGap(f"May double free on address {addr}")
+                    self.recordMemoryGap(f"May double free on address {addr}")
             elif lifetime == Lifetime.MAY_FREED:
-                self.recordGap(f"May double free on MAY_FREED address {addr}")
+                self.recordMemoryGap(f"May double free on MAY_FREED address {addr}")
 
     def replayFreeCheck(self, node: pysvf.CallICFGNode):
         """Deferred checkFree, using the stabilised state from before the free."""
@@ -3940,6 +3979,7 @@ class AbstractExecution:
                             for vid, cur_val in cur_iteration_ptr_offsets.items()
                         )
 
+                    self.restageSkippedCall(head)
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
                     pointer_init_stable = (
@@ -3973,6 +4013,7 @@ class AbstractExecution:
                             if not pre_iv.equals(narrowed_iv):
                                 ptr_stable = False
 
+                    self.restageSkippedCall(head)
                     abs_stable = (self.post_abs_trace[head] == pre_iteration_as)
                     lifetime_stable = (cur_iteration_lifetime == pre_iteration_lifetime)
                     pointer_init_stable = (
@@ -4019,7 +4060,7 @@ class AbstractExecution:
                 self.results["invaliddereference"].append(node)
             return
         if init_state == PointerInit.MAYBE_INITIALIZED:
-            self.recordGap(
+            self.recordMemoryGap(
                 f"May dereference an uninitialized pointer at node {node.getId()}"
             )
             return
@@ -4043,7 +4084,7 @@ class AbstractExecution:
                 self.buf_overflow_helper.reportNullDereference(node, msg)
                 self.results["nulldereference"].append(node)
                 return
-            self.recordGap(
+            self.recordMemoryGap(
                 f"Cannot establish pointer validity at node {node.getId()}: "
                 f"{ptr_val}"
             )
@@ -4053,7 +4094,7 @@ class AbstractExecution:
         if ptr_val.isAddr():
             addrs = ptr_val.getAddrs()
             if len(addrs) == 0:
-                self.recordGap(
+                self.recordMemoryGap(
                     f"No known pointer targets at node {node.getId()}"
                 )
                 return
@@ -4073,7 +4114,7 @@ class AbstractExecution:
                 self.results["nulldereference"].append(node)
                 return
             elif may_be_null:
-                self.recordGap(f"May null pointer dereference at node {node.getId()}")
+                self.recordMemoryGap(f"May null pointer dereference at node {node.getId()}")
 
             # Lifetime check for both heap and stack objects. 
             # The dictionary is a three-state domain; 
@@ -4122,6 +4163,6 @@ class AbstractExecution:
                     self.buf_overflow_helper.reportUseAfterFree(node, msg)
                     self.results["useafterfree"].append(node)
             elif has_lifetime_addr and may_be_dead:
-                self.recordGap(
+                self.recordMemoryGap(
                     f"May dereference expired/freed storage at node {node.getId()}"
                 )
