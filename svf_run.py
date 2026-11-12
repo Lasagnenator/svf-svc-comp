@@ -64,7 +64,7 @@ def gap_kind(reason):
     return re.sub(r"[:\[].*| at node.*| \d.*", "", reason)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=True):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
 
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
