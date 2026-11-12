@@ -174,34 +174,130 @@ class ICFGWTO:
 
 
     def visit(self, node: ICFGNode, components: List[ICFGWTOComp]):
-        head = 0 # CycleDepthNumber head(0)
-        min = 0 # CycleDepthNumber min(0)
-        loop = False # bool loop
-        self._stack.append(node)    # push(node)
-        self._num += 1  # _num += CycleDepthNumber(1)
-        head = self._num # head = _num
-        self._CDN[node] = head # setCDN(node, head)
-        for succ in self.get_successors(node): # forEachSuccessor(node, [&](const NodeT* succ)
-            succ_dfn = self._CDN.get(succ, 0) # CycleDepthNumber succ_dfn = getCDN(succ)
-            if succ_dfn == 0: # if (succ_dfn == CycleDepthNumber(0))
-                min = self.visit(succ, components) # min = visit(succ, partition)
-            else:
-                min = succ_dfn # min = succ_dfn
-            if min <= head: # if (min <= head)
-                head = min # head = min
-                loop = True # loop = true
+        frames = []
 
-        if head == self._CDN[node]: # if (head == getCDN(node))
-            self._CDN[node] = 0x7fffffff # setCDN(node, UINT_MAX)
-            element = self._stack.pop()
-            if loop:
-                while element != node:
-                    self._CDN[element] = 0 # setCDN(element, 0)
-                    element = self._stack.pop() # element = pop()
-                components.insert(0, self.component(node)) # partition.push_front(component(node))
+        def enter(n, output):
+            self._stack.append(n)
+            self._num += 1
+            self._CDN[n] = self._num
+            frames.append({
+                "node": n,
+                "components": output,
+                "head": self._num,
+                "loop": False,
+                "successors": self.get_successors(n),
+                "index": 0,
+                "phase": "visit"
+            })
+        def update_head(frame, value):
+            if value <= frame["head"]:
+                frame["head"] = value
+                frame["loop"] = True
+
+        enter(node, components)
+
+        while frames:
+            frame = frames[-1]
+            current = frame["node"]
+
+            if frame["phase"] == "visit":
+                if frame["index"] < len(frame["successors"]):
+                    succ = frame["successors"][frame["index"]]
+                    frame["index"] += 1
+
+                    succ_dfn = self._CDN.get(succ, 0)
+                    if succ_dfn == 0:
+                        enter(succ, frame["components"])
+                    else:
+                        update_head(frame, succ_dfn)
+
+                    continue
+                if frame["head"] == self._CDN[current]:
+                    self._CDN[current] = 0x7fffffff
+                    element = self._stack.pop()
+
+                    if frame["loop"]:
+                        while element != current:
+                            self._CDN[element] = 0
+                            element = self._stack.pop()
+                        frame["phase"] = "component"
+                        frame["partition"] = []
+                        frame["successors"] = self.get_successors(current)
+                        frame["index"] = 0
+                        continue
+                    else:
+                        frame["components"].insert(
+                            0, ICFGWTONode(current)
+                        )
+
+            elif frame["phase"] == "component":
+                if frame["index"] < len(frame["successors"]):
+                    succ = frame["successors"][frame["index"]]
+                    frame["index"] += 1
+
+                    if self._CDN.get(succ, 0) == 0:
+                        enter(succ, frame["partition"])
+
+                    continue
+                cycle = ICFGWTOCycle(
+                    ICFGWTONode(current),
+                    frame["partition"]
+                )
+
+                self.head_ref_to_cycle[current] = cycle
+                frame["components"].insert(0, cycle)
+            completed = frames.pop()
+
+            if frames:
+                parent = frames[-1]
+                if parent["phase"] == "visit":
+                    update_head(parent, completed["head"])
+
             else:
-                components.insert(0, ICFGWTONode(node)) # partition.push_front(newNode(node))
-        return head
+                return completed["head"]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        # head = 0 # CycleDepthNumber head(0)
+        # min = 0 # CycleDepthNumber min(0)
+        # loop = False # bool loop
+        # self._stack.append(node)    # push(node)
+        # self._num += 1  # _num += CycleDepthNumber(1)
+        # head = self._num # head = _num
+        # self._CDN[node] = head # setCDN(node, head)
+        # for succ in self.get_successors(node): # forEachSuccessor(node, [&](const NodeT* succ)
+        #     succ_dfn = self._CDN.get(succ, 0) # CycleDepthNumber succ_dfn = getCDN(succ)
+        #     if succ_dfn == 0: # if (succ_dfn == CycleDepthNumber(0))
+        #         min = self.visit(succ, components) # min = visit(succ, partition)
+        #     else:
+        #         min = succ_dfn # min = succ_dfn
+        #     if min <= head: # if (min <= head)
+        #         head = min # head = min
+        #         loop = True # loop = true
+
+        # if head == self._CDN[node]: # if (head == getCDN(node))
+        #     self._CDN[node] = 0x7fffffff # setCDN(node, UINT_MAX)
+        #     element = self._stack.pop()
+        #     if loop:
+        #         while element != node:
+        #             self._CDN[element] = 0 # setCDN(element, 0)
+        #             element = self._stack.pop() # element = pop()
+        #         components.insert(0, self.component(node)) # partition.push_front(component(node))
+        #     else:
+        #         components.insert(0, ICFGWTONode(node)) # partition.push_front(newNode(node))
+        # return head
 
 
     def get_successors(self, node: ICFGNode) -> List[ICFGNode]:
