@@ -288,7 +288,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         except ValueError as e:
             log(f"No violation witness: {e}")
     else:
-        # violation_sequence not implemented yet; produce nothing
         log(f"No witness for result: {correctness}", category=Log.SETUP)
 
     working_file.close()
