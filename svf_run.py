@@ -70,26 +70,18 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}", category=Log.SETUP)
-    # Capture clang's output: its warnings are noise on success but needed on failure.
-    clang = subprocess.run(command, stderr=subprocess.PIPE, text=True)
-    retcode = clang.returncode
+    retcode = subprocess.run(command).returncode
     buffer.close()
     log(f"Clang exitted with code {retcode}.", category=Log.SETUP)
 
     if retcode != 0:
-        log(clang.stderr)
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
         working_file.close()
         fail("ERROR(CLANG)", retcode)
-    log(clang.stderr, category=Log.SETUP)
 
 
     try:
-        # This code is copied from python/test-ae.py to use SVF
         svf_args = [working_file.name]
-
-        svf_args.append("-stat=true")
-
         pysvf.buildSVFModule(svf_args)
         pag = pysvf.getPAG()
     except Exception as e:
