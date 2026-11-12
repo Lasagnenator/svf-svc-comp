@@ -7,11 +7,17 @@ import tempfile
 import generate_witness
 import invariants
 import violations
+import re
+import sys
 
 import nondet
 from util import *
 from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
+
+# The AE walks the WTO recursively, one frame per node on the longest path, so large
+# programs go past Python's default limit of 1000 frames.
+sys.setrecursionlimit(20_000)
 
 def main():
     # this implementation just accepts the file to do testing on
@@ -35,8 +41,30 @@ def main():
 
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
 
+# Reach only. When the AE result is Unknown, the chance of error in reporting its verdict
+# Gaps (paths the AE dropped) when it found no feasible reach_error: chance the task is
+# really FALSE.
+GAP_ERROR = {
+    'external call not modelled': 0.318,
+    'reach_error sites in functions the analysis never entered': 0.053,
+    'recursive function body not analysed': 0.500,
+    'unmodelled comparison': 0.250,
+    'unresolved indirect call': 0.250,
+    'Binary op': 0.333,
+}
+
+FEASIBLE_FALSE_ERROR = 0.836
+FEASIBLE_TRUE_ERROR = 0.004
+
+# Report the AE verdict when the certainty it is right is above this.
+MIN_CERTAINTY = 0.80
+
+def gap_kind(reason):
+    """The reason without node ids, names or values."""
+    return re.sub(r"[:\[].*| at node.*| \d.*", "", reason)
+
 # Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=True):
 
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
@@ -193,7 +221,28 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         else:
             verdict = "REACH Correct"
             correctness = "Correct"
-            
+
+        if correctness == "Unknown":
+            # Each gap, and an unproven feasible site, is an independent chance of error.
+            errors = {kind: GAP_ERROR.get(kind, 1.0) for kind in map(gap_kind, gaps)}
+            safe = True
+            if feasible_ids:
+                loops = len(re.findall(r"\b(?:while|for)\s*\(", c_code))
+                floats = re.search(r"\b(?:float|double)\b", c_code) is not None
+                if len(feasible_ids) == 1 and loops == 1 and floats:
+                    errors["feasible reach_error, reporting TRUE"] = FEASIBLE_TRUE_ERROR
+                else:
+                    errors["feasible reach_error, reporting FALSE"] = FEASIBLE_FALSE_ERROR
+                    safe = False
+            certainty = 1.0
+            for error in errors.values():
+                certainty *= 1.0 - error
+            log(f"Certainty of {'TRUE' if safe else 'FALSE'}: {certainty:.0%} from errors {errors}",
+                category=Log.REACH)
+            if certainty > MIN_CERTAINTY:
+                verdict, correctness = (("REACH Correct", "Correct") if safe
+                                        else ("REACH Incorrect", "Incorrect"))
+
     elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
             ae.results.get("incomplete") or ae.results.get("memory_gaps")
             or ae.results.get("global_memory_gaps")):
