@@ -22,7 +22,7 @@ from tester import SVCOMP26_CATEGORIES  # noqa: E402
 
 
 REPOSITORY = "https://gitlab.com/sosy-lab/benchmarking/sv-benchmarks.git"
-REVISION = "svcomp26"
+REVISION = "svcomp27-freeze"
 METADATA_PATTERNS = ("/c/*.set", "/c/**/*.yml", "/c/properties/*")
 
 
