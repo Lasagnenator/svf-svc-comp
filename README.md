@@ -70,7 +70,7 @@ A running list of things to work on:
 
 ## Local benchmark scoring
 
-The runner reproduces SV-COMP 2026 scoring for the three C meta categories svf-svc competes in:
+The runner reproduces SV-COMP 2027 scoring for the three C meta categories svf-svc competes in:
 `reachsafety`, `memsafety`, and `softwaresystems`. Leaf categories mirror `benchmark-defs/svf-svc.xml`.
 
 ### Fetching benchmarks

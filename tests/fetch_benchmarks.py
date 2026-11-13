@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tester import SVCOMP26_CATEGORIES  # noqa: E402
+from tester import SVCOMP27_CATEGORIES  # noqa: E402
 
 
 REPOSITORY = "https://gitlab.com/sosy-lab/benchmarking/sv-benchmarks.git"
@@ -47,7 +47,7 @@ def add_sparse_patterns(dest, patterns):
 def selected_set_names(categories):
     names = set()
     for category in categories:
-        for spec in SVCOMP26_CATEGORIES[category]:
+        for spec in SVCOMP27_CATEGORIES[category]:
             names.update(spec.includes)
             names.update(spec.excludes)
     return sorted(names)
@@ -85,7 +85,7 @@ def manifest_source_patterns(manifest_path):
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--category", action="append", choices=tuple(SVCOMP26_CATEGORIES),
+    parser.add_argument("--category", action="append", choices=tuple(SVCOMP27_CATEGORIES),
                         help="meta category to fetch; repeat to combine")
     parser.add_argument("--all", action="store_true", help="fetch every competed-in category")
     parser.add_argument("--dest", type=Path, default=Path("../sv-benchmarks"),
@@ -120,7 +120,7 @@ def main(argv=None):
         print(f"Corpus ready: {dest}")
         return 0
 
-    categories = sorted(SVCOMP26_CATEGORIES) if args.all else (args.category or [])
+    categories = sorted(SVCOMP27_CATEGORIES) if args.all else (args.category or [])
     if not categories:
         build_parser().error("select --category, --all, or --from-manifest")
 
