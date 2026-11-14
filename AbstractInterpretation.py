@@ -11,6 +11,7 @@ import pysvf
 from pysvf import IntervalValue, AddressValue, AbstractValue, AbstractState
 import sys
 from pysvf.enums import OpCode, Predicate
+import math
 
 from enum import Enum
 
@@ -2482,7 +2483,30 @@ class AbstractExecution:
                     return IntervalValue(numeral, numeral)
 
                 elif isinstance(objVar, pysvf.ConstFPObjVar):
-                    raise UnknownException("ConstFPObjVar not implemented yet")
+                    # currently we handle float by using integer intervals
+                    # i.e. round the lower bound down and the upper bound up
+                    # e.g. 2.6 is converted to [2, 3]
+                    try:
+                        value = objVar.getFPValue()
+                        # This method cannot distinguish between -0.0 and 0.0.
+                        # as this method converts both -0.0 and 0.0 to [0, 0]
+                        if value == 0.0 and "float -0.000000e+00" in str(objVar):
+                            raise UnknownException(
+                                "Negative floating-point zero is not supported"
+                            )
+
+                        if not math.isfinite(value):
+                            raise UnknownException("Non-finite floating-point constant")
+                        lower = math.floor(value)
+                        upper = math.ceil(value)
+                        return IntervalValue(lower, upper)
+
+                    except UnknownException:
+                        raise
+                    except (AttributeError, TypeError, ValueError, RuntimeError) as e:
+                        raise UnknownException(
+                            f"Native floating-point initialization failed: {e}"
+                        ) from e
 
                 elif isinstance(objVar, pysvf.ConstNullPtrObjVar):
                     return AddressValue(pysvf.NullMemAddr)
