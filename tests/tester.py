@@ -67,13 +67,13 @@ class CategorySpec:
     excludes: tuple[str, ...] = ()
 
 
-# Leaf categories as defined by benchmark-defs/svf-svc.xml for SV-COMP 2026.
-SVCOMP26_CATEGORIES = {
+# Leaf categories as defined by benchmark-defs/svf-svc.xml for SV-COMP 2027.
+SVCOMP27_CATEGORIES = {
     "reachsafety": (
         CategorySpec("C.unreach-call.Arrays", "reach", ("Arrays",)),
         CategorySpec("C.unreach-call.BitVectors", "reach", ("BitVectors",)),
         CategorySpec("C.unreach-call.Combinations", "reach", ("Combinations",)),
-        CategorySpec("C.unreach-call.ControlFlow", "reach", ("ControlFlow", "Sanity")),
+        CategorySpec("C.unreach-call.ControlFlow", "reach", ("ControlFlow",)),
         CategorySpec("C.unreach-call.ECA", "reach", ("ECA",)),
         CategorySpec("C.unreach-call.Floats", "reach", ("Floats",)),
         CategorySpec("C.unreach-call.Hardness", "reach", ("Hardness",)),
@@ -84,6 +84,7 @@ SVCOMP26_CATEGORIES = {
         CategorySpec("C.unreach-call.Recursive", "reach", ("Recursive", "VerifyThis-Recursive")),
         CategorySpec("C.unreach-call.Sequentialized", "reach", ("Sequentialized",)),
         CategorySpec("C.unreach-call.XCSP", "reach", ("XCSP",)),
+        CategorySpec("C.unreach-call.Cir2c", "reach", ("cir2c-ESBMC",)),
     ),
     "memsafety": (
         CategorySpec("C.valid-memcleanup.Main", "cleanup",
@@ -100,6 +101,10 @@ SVCOMP26_CATEGORIES = {
         CategorySpec("C.no-overflow.SoftwareSystems-BusyBox", "overflow", ("SoftwareSystems-BusyBox",)),
         CategorySpec("C.no-overflow.SoftwareSystems-coreutils", "overflow", ("SoftwareSystems-coreutils",)),
         CategorySpec("C.no-overflow.SoftwareSystems-uthash", "overflow", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.no-overflow.SoftwareSystems-Other", "overflow",
+                     ("SoftwareSystems-AWS-C-Common", "SoftwareSystems-DeviceDriversLinux64")),
+        CategorySpec("C.no-overflow.SoftwareSystems-Hacl-Star", "overflow",
+                     ("SoftwareSystems-Hacl-Star",)),
         CategorySpec("C.termination.SoftwareSystems-DeviceDriversLinux64", "termination",
                      ("SoftwareSystems-DeviceDriversLinux64",)),
         CategorySpec("C.termination.SoftwareSystems-uthash", "termination", ("SoftwareSystems-uthash",)),
@@ -113,15 +118,18 @@ SVCOMP26_CATEGORIES = {
         CategorySpec("C.unreach-call.SoftwareSystems-Intel-TDX-Module", "reach",
                      ("SoftwareSystems-Intel-TDX-Module",)),
         CategorySpec("C.unreach-call.SoftwareSystems-Other", "reach",
-                     ("SoftwareSystems-coreutils", "SoftwareSystems-BusyBox", "SoftwareSystems-OpenBSD")),
+                     ("ArgV", "SoftwareSystems-coreutils", "SoftwareSystems-BusyBox",
+                      "SoftwareSystems-OpenBSD")),
         CategorySpec("C.unreach-call.SoftwareSystems-uthash", "reach", ("SoftwareSystems-uthash",)),
         CategorySpec("C.valid-memcleanup.SoftwareSystems-uthash", "cleanup", ("SoftwareSystems-uthash",)),
         CategorySpec("C.valid-memsafety.SoftwareSystems-coreutils", "safety", ("SoftwareSystems-coreutils",)),
         CategorySpec("C.valid-memsafety.SoftwareSystems-DeviceDriversLinux64", "safety",
                      ("SoftwareSystems-DeviceDriversLinux64",)),
         CategorySpec("C.valid-memsafety.SoftwareSystems-Other", "safety",
-                     ("SoftwareSystems-BusyBox", "SoftwareSystems-OpenBSD")),
+                     ("ArgV", "SoftwareSystems-BusyBox", "SoftwareSystems-OpenBSD")),
         CategorySpec("C.valid-memsafety.SoftwareSystems-uthash", "safety", ("SoftwareSystems-uthash",)),
+        CategorySpec("C.valid-memsafety.SoftwareSystems-Hacl-Star", "safety",
+                     ("SoftwareSystems-Hacl-Star",)),
     ),
 }
 
@@ -351,7 +359,7 @@ def discover_category_tasks(args):
     discovery_errors = []
     metadata = []
     for meta_category in args.category:
-        for spec in SVCOMP26_CATEGORIES[meta_category]:
+        for spec in SVCOMP27_CATEGORIES[meta_category]:
             include_files = resolve_set_files(args.bench_root, spec.includes)
             include_paths, include_metadata, _ = expand_set_files(args.bench_root, include_files)
             excluded_paths = set()
@@ -524,7 +532,7 @@ def witness_required(task, answer):
         return True
     if task.property_name in {"safety", "cleanup", "termination"}:
         return False
-    # SV-COMP 2026 does not require correctness witnesses for these leaf categories.
+    # SV-COMP 2027 does not require correctness witnesses for these leaf categories.
     return task.category not in {
         "C.unreach-call.Arrays",
         "C.unreach-call.Floats",
@@ -806,8 +814,8 @@ def build_parser():
     parser.add_argument("--cleanup", action="store_true", help="test valid-memcleanup properties")
     parser.add_argument("--overflow", action="store_true", help="test no-overflow properties")
     parser.add_argument("--termination", action="store_true", help="test termination properties")
-    parser.add_argument("--category", action="append", choices=tuple(SVCOMP26_CATEGORIES),
-                        help="select an official SV-COMP 2026 C meta category; repeat to combine")
+    parser.add_argument("--category", action="append", choices=tuple(SVCOMP27_CATEGORIES),
+                        help="select an official SV-COMP 2027 C meta category; repeat to combine")
     parser.add_argument("--specific", help="only task paths containing this text")
     parser.add_argument("--skip", action="append", default=[], help="skip task paths containing this text")
     parser.add_argument("--set", dest="sets", action="append", default=[], metavar="SET",
@@ -908,7 +916,7 @@ def main(argv=None):
         "schema_version": 1,
         "corpus": str(args.bench_root),
         "tool": str(args.svf_root / "svf_run.py"),
-        "competition": "SV-COMP 2026",
+        "competition": "SV-COMP 2027",
         "meta_categories": args.category,
         "categories": category_metadata,
         "set_selectors": args.sets,

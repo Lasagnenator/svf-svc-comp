@@ -12,7 +12,7 @@ on:
         default: "100"
 
 env:
-  BENCH_REVISION: svcomp26
+  BENCH_REVISION: svcomp27-freeze
   BENCH_DIR: ${{ github.workspace }}/sv-benchmarks
   SAMPLE_COUNT: ${{ github.event.inputs.sample_count || '100' }}
   SEED: ${{ github.sha }}
