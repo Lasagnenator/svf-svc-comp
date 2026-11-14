@@ -2624,17 +2624,17 @@ class AbstractExecution:
         return "unset"
 
     def unmodelledCompare(self, node, cmp, v0, v1):
-        if (
-            cmp.getPredicate() == Predicate.ICMP_UGT
-            and v0.isAddr()
-            and v1.isInterval()
-            and v1.getInterval().is_numeral()
-            and v1.getInterval().lb() == pysvf.BoundedInt(-4095)
-        ):
-            return IntervalValue(0, 1)
         """A comparison we have no model for: an interval against an address, an operand
         that was never written, or a predicate missing from the chain.
         """
+        if (
+                    cmp.getPredicate() == Predicate.ICMP_UGT
+                    and v0.isAddr()
+                    and v1.isInterval()
+                    and v1.getInterval().is_numeral()
+                    and v1.getInterval().lb() == pysvf.BoundedInt(-4095)
+                ):
+                    return IntervalValue(0, 1)
         key = (node.getId(), cmp.getResId())
         if key not in self.unmodelled_cmps:
             self.unmodelled_cmps.add(key)
