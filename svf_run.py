@@ -217,16 +217,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         for n in pag.getICFG().getNodes():
             if not isinstance(n, pysvf.CallICFGNode) or n.getId() not in icfg_sites:
                 continue
-            if n.getId() == 17:
-                log(
-                    f"[NODE17] "
-                    f"function={n.getFun().getName() if n.getFun() else None}, "
-                    f"visited={n.getId() in visited_sites}, "
-                    f"analysed={n.getFun().getName() in analysed if n.getFun() else False}, "
-                    f"infeasible={n in ae.infeasible_nodes}, "
-                    f"proven_dead={n in proven_dead}, "
-                    f"has_state={n in ae.post_abs_trace}"
-                )
             if n.getId() in visited_sites:
                 continue
 
