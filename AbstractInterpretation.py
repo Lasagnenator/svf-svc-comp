@@ -11,6 +11,7 @@ import pysvf
 from pysvf import IntervalValue, AddressValue, AbstractValue, AbstractState
 import sys
 from pysvf.enums import OpCode, Predicate
+import math
 
 from enum import Enum
 
@@ -174,35 +175,87 @@ class ICFGWTO:
 
 
     def visit(self, node: ICFGNode, components: List[ICFGWTOComp]):
-        head = 0 # CycleDepthNumber head(0)
-        min = 0 # CycleDepthNumber min(0)
-        loop = False # bool loop
-        self._stack.append(node)    # push(node)
-        self._num += 1  # _num += CycleDepthNumber(1)
-        head = self._num # head = _num
-        self._CDN[node] = head # setCDN(node, head)
-        for succ in self.get_successors(node): # forEachSuccessor(node, [&](const NodeT* succ)
-            succ_dfn = self._CDN.get(succ, 0) # CycleDepthNumber succ_dfn = getCDN(succ)
-            if succ_dfn == 0: # if (succ_dfn == CycleDepthNumber(0))
-                min = self.visit(succ, components) # min = visit(succ, partition)
-            else:
-                min = succ_dfn # min = succ_dfn
-            if min <= head: # if (min <= head)
-                head = min # head = min
-                loop = True # loop = true
+        frames = []
 
-        if head == self._CDN[node]: # if (head == getCDN(node))
-            self._CDN[node] = 0x7fffffff # setCDN(node, UINT_MAX)
-            element = self._stack.pop()
-            if loop:
-                while element != node:
-                    self._CDN[element] = 0 # setCDN(element, 0)
-                    element = self._stack.pop() # element = pop()
-                components.insert(0, self.component(node)) # partition.push_front(component(node))
-            else:
-                components.insert(0, ICFGWTONode(node)) # partition.push_front(newNode(node))
-        return head
+        def enter(n, output):
+            self._stack.append(n)
+            self._num += 1
+            self._CDN[n] = self._num
+            frames.append({
+                "node": n,
+                "components": output,
+                "head": self._num,
+                "loop": False,
+                "successors": self.get_successors(n),
+                "index": 0,
+                "phase": "visit"
+            })
+        def update_head(frame, value):
+            if value <= frame["head"]:
+                frame["head"] = value
+                frame["loop"] = True
 
+        enter(node, components)
+
+        while frames:
+            frame = frames[-1]
+            current = frame["node"]
+
+            if frame["phase"] == "visit":
+                if frame["index"] < len(frame["successors"]):
+                    succ = frame["successors"][frame["index"]]
+                    frame["index"] += 1
+
+                    succ_dfn = self._CDN.get(succ, 0)
+                    if succ_dfn == 0:
+                        enter(succ, frame["components"])
+                    else:
+                        update_head(frame, succ_dfn)
+
+                    continue
+                if frame["head"] == self._CDN[current]:
+                    self._CDN[current] = 0x7fffffff
+                    element = self._stack.pop()
+
+                    if frame["loop"]:
+                        while element != current:
+                            self._CDN[element] = 0
+                            element = self._stack.pop()
+                        frame["phase"] = "component"
+                        frame["partition"] = []
+                        frame["successors"] = self.get_successors(current)
+                        frame["index"] = 0
+                        continue
+                    else:
+                        frame["components"].insert(
+                            0, ICFGWTONode(current)
+                        )
+
+            elif frame["phase"] == "component":
+                if frame["index"] < len(frame["successors"]):
+                    succ = frame["successors"][frame["index"]]
+                    frame["index"] += 1
+
+                    if self._CDN.get(succ, 0) == 0:
+                        enter(succ, frame["partition"])
+
+                    continue
+                cycle = ICFGWTOCycle(
+                    ICFGWTONode(current),
+                    frame["partition"]
+                )
+
+                self.head_ref_to_cycle[current] = cycle
+                frame["components"].insert(0, cycle)
+            completed = frames.pop()
+
+            if frames:
+                parent = frames[-1]
+                if parent["phase"] == "visit":
+                    update_head(parent, completed["head"])
+
+            else:
+                return completed["head"]
 
     def get_successors(self, node: ICFGNode) -> List[ICFGNode]:
         successors = []
@@ -2430,7 +2483,30 @@ class AbstractExecution:
                     return IntervalValue(numeral, numeral)
 
                 elif isinstance(objVar, pysvf.ConstFPObjVar):
-                    raise UnknownException("ConstFPObjVar not implemented yet")
+                    # currently we handle float by using integer intervals
+                    # i.e. round the lower bound down and the upper bound up
+                    # e.g. 2.6 is converted to [2, 3]
+                    try:
+                        value = objVar.getFPValue()
+                        # This method cannot distinguish between -0.0 and 0.0.
+                        # as this method converts both -0.0 and 0.0 to [0, 0]
+                        if value == 0.0 and "float -0.000000e+00" in str(objVar):
+                            raise UnknownException(
+                                "Negative floating-point zero is not supported"
+                            )
+
+                        if not math.isfinite(value):
+                            raise UnknownException("Non-finite floating-point constant")
+                        lower = math.floor(value)
+                        upper = math.ceil(value)
+                        return IntervalValue(lower, upper)
+
+                    except UnknownException:
+                        raise
+                    except (AttributeError, TypeError, ValueError, RuntimeError) as e:
+                        raise UnknownException(
+                            f"Native floating-point initialization failed: {e}"
+                        ) from e
 
                 elif isinstance(objVar, pysvf.ConstNullPtrObjVar):
                     return AddressValue(pysvf.NullMemAddr)
@@ -2551,6 +2627,14 @@ class AbstractExecution:
         """A comparison we have no model for: an interval against an address, an operand
         that was never written, or a predicate missing from the chain.
         """
+        if (
+                    cmp.getPredicate() == Predicate.ICMP_UGT
+                    and v0.isAddr()
+                    and v1.isInterval()
+                    and v1.getInterval().is_numeral()
+                    and v1.getInterval().lb() == pysvf.BoundedInt(-4095)
+                ):
+                    return IntervalValue(0, 1)
         key = (node.getId(), cmp.getResId())
         if key not in self.unmodelled_cmps:
             self.unmodelled_cmps.add(key)

@@ -55,7 +55,7 @@ FEASIBLE_FALSE_ERROR = 0.836
 FEASIBLE_TRUE_ERROR = 0.004
 
 # Report the AE verdict when the certainty it is right is above this.
-MIN_CERTAINTY = 0.80
+MIN_CERTAINTY = 1.00
 
 def gap_kind(reason):
     """The reason without node ids, names or values."""
@@ -179,14 +179,54 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         # Only a gap if the holding function was never analysed; otherwise the guard was pruned.
         analysed = getattr(ae, "visited", set())
         proven_dead = getattr(ae, "unreachable_nodes", set())
+        calls_by_function = {}
+        indirect_callers = set()
+
+        for call in pag.getICFG().getNodes():
+            if not isinstance(call, pysvf.CallICFGNode):
+                continue
+
+            caller = call.getFun()
+            if caller is None or call in proven_dead:
+                continue
+
+            caller_name = caller.getName()
+            callee = call.getCalledFunction()
+
+            if callee is None:
+                indirect_callers.add(caller_name)
+            else:
+                calls_by_function.setdefault(caller_name, set()).add(
+                    callee.getName()
+                )
+
+        possibly_entered = set(analysed)
+        worklist = list(analysed)
+
+        while worklist:
+            function = worklist.pop()
+
+            for callee in calls_by_function.get(function, ()):
+                if callee not in possibly_entered:
+                    possibly_entered.add(callee)
+                    worklist.append(callee)
+
+        # An unresolved indirect call could target an otherwise unentered function.
+        has_unknown_targets = bool(possibly_entered & indirect_callers)
         unreached = set()
         for n in pag.getICFG().getNodes():
             if not isinstance(n, pysvf.CallICFGNode) or n.getId() not in icfg_sites:
                 continue
-            if n.getId() in visited_sites or n in proven_dead:
+            if n.getId() in visited_sites:
                 continue
+
             holder = n.getFun().getName() if n.getFun() else None
+
             if holder is None or holder not in analysed:
+                # Never trust propagated deadness inside a function
+                # that AE never actually analysed.
+                unreached.add(n.getId())
+            elif n not in proven_dead:
                 unreached.add(n.getId())
         log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
         log(f"AE visited reach_error sites  : {sorted(visited_sites)}", category=Log.REACH)
