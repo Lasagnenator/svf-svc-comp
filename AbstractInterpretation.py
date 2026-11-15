@@ -11,7 +11,6 @@ import pysvf
 from pysvf import IntervalValue, AddressValue, AbstractValue, AbstractState
 import sys
 from pysvf.enums import OpCode, Predicate
-import math
 
 from enum import Enum
 
