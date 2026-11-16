@@ -239,8 +239,17 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         for reason in sorted(set(gaps))[:25]:
             log(f"  gap: {reason}", category=Log.REACH)
 
+        proof_segments = None
         if feasible_ids:
-            if claim_violations:
+            if not claim_violations:
+                try:
+                    proof_segments = violations.definite_reach_segments(
+                        ae, pag, input_file_path, input_line_count, bits)
+                except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+                    log(f"Exact path check unavailable: {error}", category=Log.REACH)
+            if claim_violations or proof_segments:
+                if proof_segments:
+                    log("Exact scalar path reaches reach_error.", category=Log.REACH)
                 verdict = "REACH Incorrect"
                 correctness = "Incorrect"
             else:
@@ -345,7 +354,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         with open(prop_file_path) as f:
             spec = f.read().strip()
         if prop_file_name == 'unreach-call.prp':
-            segments = violations.reach_error_segments(
+            segments = proof_segments or violations.reach_error_segments(
                 ae.results.get("reach", []), cfl_ids, input_file_path, input_line_count)
         elif prop_file_name == 'valid-memsafety.prp':
             # Name only the violated subproperty, not the whole property file.

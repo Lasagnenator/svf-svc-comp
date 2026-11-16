@@ -150,11 +150,17 @@ def invariant_at(node, state, pag, max_line=None, allowed_names=None, loop_line=
     return " && ".join(clauses) if clauses else None
 
 
-def _source_loops(file_name):
+def _source_loops(file_name, node_kinds=("ForStmt", "WhileStmt", "DoStmt"), bits=None):
     source = Path(file_name).resolve()
+    command = ["clang-21", "-x", "c", "-fsyntax-only", "-Xclang", "-ast-dump=json"]
+    if "CallExpr" in node_kinds:
+        command.extend(("-Werror", "-Wcast-qual"))
+    if bits is not None:
+        command.append(f"-m{bits}")
+    command.append(str(source))
     try:
         process = subprocess.run(
-            ["clang-21", "-x", "c", "-fsyntax-only", "-Xclang", "-ast-dump=json", str(source)],
+            command,
             capture_output=True, text=True,
         )
         if process.returncode != 0:
@@ -188,6 +194,13 @@ def _source_loops(file_name):
         location = function.get("loc", {})
         if "includedFrom" in location or Path(location.get("file", source)).resolve() != source:
             continue
+        if "CallExpr" in node_kinds and any(
+            node.get("kind") in ("VarDecl", "CompoundLiteralExpr", "CompoundStmt", "ForStmt")
+            and (type(node.get("range", {}).get("begin", {}).get("offset")) is not int
+                 or type(node.get("range", {}).get("end", {}).get("offset")) is not int)
+            for node in walk(function)
+        ):
+            continue
         declarations = {}
         escaped = set()
         for node in walk(function):
@@ -200,7 +213,7 @@ def _source_loops(file_name):
                        "desugaredQualType", cursors[0].get("type", {}).get("qualType", "")
                    ).split()}
         for loop in walk(function):
-            if loop.get("kind") not in ("ForStmt", "WhileStmt", "DoStmt"):
+            if loop.get("kind") not in node_kinds:
                 continue
             begin = loop.get("range", {}).get("begin", {})
             end = loop.get("range", {}).get("end", {})
@@ -211,9 +224,18 @@ def _source_loops(file_name):
                 or Path(begin.get("file", source)).resolve() != source):
                 continue
             line, column = position(start_offset)
-            loops.append({"line": line, "column": column,
-                          "end": position(end_offset + end.get("tokLen", 1)), "function": function["name"],
-                          "allowed_names": locals_ - escaped})
+            entry = {"line": line, "column": column,
+                     "end": position(end_offset + end.get("tokLen", 1)), "function": function["name"],
+                     "kind": loop.get("kind"),
+                     "linkage_name": function.get("mangledName", function["name"]),
+                     "allowed_names": locals_ - escaped}
+            if loop.get("kind") == "CallExpr":
+                callees = [child.get("referencedDecl", {}).get("name")
+                           for callee in loop.get("inner", [])[:1] for child in walk(callee)
+                           if child.get("kind") == "DeclRefExpr"
+                           and child.get("referencedDecl", {}).get("kind") == "FunctionDecl"]
+                entry["callee"] = callees[0] if len(callees) == 1 else None
+            loops.append(entry)
     return loops
 
 
