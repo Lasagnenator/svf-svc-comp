@@ -63,6 +63,7 @@ def gap_kind(reason):
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
 def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
+    prop_file_name = prop_file_path.split('/')[-1]
 
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
@@ -93,6 +94,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                "-Wno-error=incompatible-function-pointer-types",
                "-fbracket-depth=1024",
                "-o", working_file.name,]
+    if prop_file_name == 'unreach-call.prp':
+        command.append("-fgnu89-inline")
     command.append(buffer.name)
 
     log(f"Running clang with command: {' '.join(command)}", category=Log.SETUP)
@@ -115,10 +118,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log_exception(e)
         working_file.close()
         fail("ERROR(SVF)")
-
-
-    # parse input prop file path to find the file name
-    prop_file_name = prop_file_path.split('/')[-1]
 
     # ae first
     try:
