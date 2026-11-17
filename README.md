@@ -176,3 +176,18 @@ The tester exits non-zero when the harness itself fails, meaning the tool never 
 was interrupted, so CI gates on its exit code. Analyser unknowns and tool errors are reported
 without failing the build, since they reflect coverage rather than runner health. Use the workflow
 dispatch inputs to choose a category or sample size, capped at 100 runs.
+
+## Symbolic reachability refinement
+
+Path refinement preserves identities for repeated checked integer arithmetic and
+binary32/binary64 floating expressions. Floating inputs track NaN possibility and
+ordered bounds; finite arithmetic uses outward bounds while repeated expressions
+can be compared under non-NaN guards. Path predicates survive matched calls. Independent inputs and overwritten memory do
+not acquire equal identities. Fast-math, unsupported floating conversions and
+formats remain inconclusive. This is not a full IEEE interval engine or general
+relational loop-invariant inference. At supported non-PHI SVF loop heads, an
+optional proof attempt checks the body and exits from arbitrary scalar values;
+backedges close only if initialized cell types, allocation layout, and pointer
+contents still match that arbitrary-state premise. Unsupported attempts retain
+the bounded fallback within the existing deadline. This is not abstract-state
+repetition treated as a proof.

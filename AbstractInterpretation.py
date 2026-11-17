@@ -6,6 +6,9 @@ from typing import List, Dict, Set, Optional
 import pysvf
 import re
 import operator
+import copy
+import math
+import struct
 import time
 import faulthandler
 faulthandler.enable()
@@ -4375,6 +4378,16 @@ class _PathInteger:
     parent_unsigned: bool = False
 
 
+@dataclass(frozen=True)
+class _PathFloat:
+    width: int
+    token: int
+    lower: float = -math.inf
+    upper: float = math.inf
+    nan: bool = True
+    bits: object = None
+
+
 @dataclass
 class _PathState:
     node: object
@@ -4390,11 +4403,13 @@ class _PathState:
     phi_previous: object = None
     phi_values: object = None
     inputs: dict = field(default_factory=dict)
+    induction_started: bool = False
+    constraints: dict = field(default_factory=dict)
 
     def clone(self):
         return _PathState(self.node, self.previous, self.values.copy(), self.memory.copy(), self.sizes.copy(),
                           self.versions.copy(), self.readonly.copy(), list(self.frames), self.frame,
-                          set(self.visits), self.phi_previous, self.phi_values, self.inputs.copy())
+                          set(self.visits), self.phi_previous, self.phi_values, self.inputs.copy(), self.induction_started, self.constraints.copy())
 
 
 class _ReachabilityRefinement:
@@ -4417,10 +4432,224 @@ class _ReachabilityRefinement:
         self.steps = 0
         self.input_candidates = []
         self.width_cache = {}
+        self.expression_tokens = {}
+        self.induction = None
+        self.induction_attempts = set()
+        self.loop_headers = {}
 
     def integer(self, lower, upper, width, **facts):
         self.serial += 1
         return _PathInteger(IntervalValue(int(lower), int(upper)), width, self.serial, **facts)
+
+    def expression(self, lower, upper, width, operation, operands, **facts):
+        identities = tuple((('floating-constant', value.width, value.bits) if value.bits is not None
+                            else ('floating-value', value.width, value.token)) if isinstance(value, _PathFloat)
+                           else (('constant', value.width, self.bounds(value)[0])
+                                 if self.bounds(value)[0] == self.bounds(value)[1]
+                                 else ('value', value.width, value.token)) for value in operands)
+        key = (operation, width, identities)
+        result = self.integer(lower, upper, width, **facts)
+        token = self.expression_tokens.setdefault(key, result.token)
+        return replace(result, token=token)
+
+    def floating(self, width, lower=-math.inf, upper=math.inf, nan=True, operation=None, operands=(), bits=None):
+        self.serial += 1
+        token = self.serial
+        if operation is not None:
+            identities = tuple(('constant', value.width, value.bits) if value.bits is not None
+                               else ('value', value.width, value.token) for value in operands)
+            token = self.expression_tokens.setdefault(('floating', operation, width, identities), token)
+        return _PathFloat(width, token, lower, upper, nan, bits)
+
+    @staticmethod
+    def floating_width(var):
+        kind = var.getType() if var is not None else None
+        if kind is None or kind.isPointerTy() or kind.isIntegerType():
+            return None
+        text = var.toString()
+        if re.search(r'\b(?:fp128|x86_fp80|half|bfloat)\b', text):
+            raise _RefinementUnsupported('unsupported floating format')
+        size = kind.getByteSize()
+        return size * 8 if size in (4, 8) and re.search(r'\b(?:float|double)\b', text) else None
+
+    def floating_constant(self, var):
+        width = self.floating_width(var)
+        match = re.search(r'\b(?:float|double)\s+(0x[0-9A-Fa-f]+|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\b', var.toString())
+        if width is None or match is None:
+            raise _RefinementUnsupported('unavailable floating constant')
+        text = match.group(1)
+        number = struct.unpack('>d', int(text, 16).to_bytes(8, 'big'))[0] if text.startswith('0x') else float(text)
+        packed = struct.pack('>f' if width == 32 else '>d', number)
+        number = struct.unpack('>f' if width == 32 else '>d', packed)[0]
+        bits = int.from_bytes(packed, 'big')
+        return self.floating(width, 1 if math.isnan(number) else number,
+                             0 if math.isnan(number) else number, math.isnan(number), bits=bits)
+
+    @staticmethod
+    def floating_outward(number, width, upper):
+        if width == 64:
+            return math.nextafter(number, math.inf if upper else -math.inf)
+        try:
+            packed = struct.pack('>f', number)
+        except OverflowError:
+            packed = struct.pack('>f', math.copysign(math.inf, number))
+        rounded = struct.unpack('>f', packed)[0]
+        if rounded == (math.inf if upper else -math.inf):
+            return rounded
+        if rounded == 0:
+            bits = 1 if upper else (1 << 31) | 1
+        else:
+            bits = int.from_bytes(packed, 'big')
+            bits += 1 if (rounded > 0) == upper else -1
+        return struct.unpack('>f', bits.to_bytes(4, 'big'))[0]
+
+    def narrow_floating(self, state, value, lower=-math.inf, upper=math.inf, nan=True):
+        state.frames = [(call, caller.copy(), frame) for call, caller, frame in state.frames]
+        tables = [state.values, state.memory, state.inputs] + [caller for _, caller, _ in state.frames]
+        lower, upper, nan = max(lower, value.lower), min(upper, value.upper), nan and value.nan
+        for table in tables:
+            for current in table.values():
+                if isinstance(current, _PathFloat) and current.token == value.token:
+                    lower, upper, nan = max(lower, current.lower), min(upper, current.upper), nan and current.nan
+        if lower > upper and not nan:
+            return False
+        narrowed = replace(value, lower=lower, upper=upper, nan=nan)
+        for table in tables:
+            for identifier, current in list(table.items()):
+                if isinstance(current, _PathFloat) and current.token == value.token:
+                    table[identifier] = narrowed
+        return True
+
+    @staticmethod
+    def floating_comparison(predicate, left, right):
+        accepted = (set(), {0}, {1}, {0, 1}, {-1}, {-1, 0}, {-1, 1}, {-1, 0, 1},
+                    {2}, {0, 2}, {1, 2}, {0, 1, 2}, {-1, 2}, {-1, 0, 2}, {-1, 1, 2}, {-1, 0, 1, 2})[predicate]
+        relations = {2} if left.nan or right.nan else set()
+        if left.lower <= left.upper and right.lower <= right.upper:
+            if left.token == right.token:
+                relations.add(0)
+            else:
+                if left.lower < right.upper:
+                    relations.add(-1)
+                if left.upper > right.lower:
+                    relations.add(1)
+                if max(left.lower, right.lower) <= min(left.upper, right.upper):
+                    relations.add(0)
+        outcomes = {int(relation in accepted) for relation in relations}
+        return min(outcomes), max(outcomes)
+
+    def floating_condition(self, state, predicate, left, right, truth):
+        predicate = int(predicate) if truth else 15 - int(predicate)
+        if predicate in range(1, 8):
+            if not self.narrow_floating(state, left, nan=False) or not self.narrow_floating(state, right, nan=False):
+                return False
+        elif predicate == 8:
+            if left.token == right.token or not right.nan:
+                return self.narrow_floating(state, left, 1, 0)
+            if not left.nan:
+                return self.narrow_floating(state, right, 1, 0)
+            return True
+        elif left.nan or right.nan:
+            return True
+        if predicate in (0, 7, 15):
+            return predicate != 0
+        predicate = predicate - 8 if predicate > 8 else predicate
+        low_left, high_left, low_right, high_right = left.lower, left.upper, right.lower, right.upper
+        if predicate == 1:
+            low_left = low_right = max(low_left, low_right)
+            high_left = high_right = min(high_left, high_right)
+        elif predicate in (2, 3):
+            if predicate == 2:
+                if low_right == math.inf or high_left == -math.inf:
+                    return False
+                low_left = max(low_left, math.nextafter(low_right, math.inf))
+                high_right = min(high_right, math.nextafter(high_left, -math.inf))
+            else:
+                low_left, high_right = max(low_left, low_right), min(high_right, high_left)
+        elif predicate in (4, 5):
+            if predicate == 4:
+                if high_right == -math.inf or low_left == math.inf:
+                    return False
+                high_left = min(high_left, math.nextafter(high_right, -math.inf))
+                low_right = max(low_right, math.nextafter(low_left, math.inf))
+            else:
+                high_left, low_right = min(high_left, high_right), max(low_right, low_left)
+        return (self.narrow_floating(state, left, low_left, high_left, False)
+                and self.narrow_floating(state, right, low_right, high_right, False))
+
+    def loop_shape(self, state):
+        memory = {}
+        for cell, value in state.memory.items():
+            if isinstance(value, (_PathInteger, _PathFloat)):
+                memory[cell] = (type(value).__name__, value.width)
+            elif isinstance(value, tuple) and value[0] == 'pointer':
+                memory[cell] = value
+            elif cell[:2] in state.readonly:
+                memory[cell] = value
+            else:
+                raise _RefinementUnsupported('non-scalar inductive memory')
+        return (memory, state.sizes.copy(), state.readonly.copy())
+
+    def inductive_loop(self, state):
+        function = state.node.getFun()
+        if function not in self.loop_headers:
+            wto = ICFGWTO(self.graph, self.graph.getFunEntryICFGNode(function))
+            wto.init()
+            pending = list(wto.components)
+            headers = set()
+            while pending:
+                component = pending.pop()
+                if isinstance(component, ICFGWTOCycle):
+                    headers.add(component.head.node)
+                    pending.extend(component.components)
+            self.loop_headers[function] = headers
+        key = (state.node.getId(), state.frame)
+        if state.node not in self.loop_headers[function] or key in self.induction_attempts:
+            return False
+        self.induction_attempts.add(key)
+        if any(isinstance(statement, pysvf.PhiStmt) for statement in state.node.getSVFStmts()):
+            return False
+        candidate = state.clone()
+        try:
+            shape = self.loop_shape(candidate)
+            def havoc(value):
+                if isinstance(value, _PathInteger):
+                    return self.integer(*self.limits(value.width), value.width)
+                if isinstance(value, _PathFloat):
+                    return self.floating(value.width)
+                return value
+            candidate.values = {identifier: havoc(value) for identifier, value in candidate.values.items()}
+            candidate.memory = {cell: havoc(value) for cell, value in candidate.memory.items()}
+            candidate.frames = [(call, {identifier: havoc(value) for identifier, value in caller.items()}, frame)
+                                for call, caller, frame in candidate.frames]
+            candidate.inputs = {}
+            candidate.constraints = {}
+            candidate.visits = set()
+            candidate.phi_previous = candidate.phi_values = None
+            candidate.induction_started = False
+            checker = copy.copy(self)
+            checker.gaps = set()
+            checker.steps = 0
+            checker.input_candidates = []
+            checker.expression_tokens = self.expression_tokens.copy()
+            checker.induction = (key, shape)
+            checker.deadline = min(self.deadline, time.process_time() + max(0, self.deadline - time.process_time()) / 2)
+            safe, _ = checker.run(candidate)
+            self.serial = max(self.serial, checker.serial)
+            self.next_frame = max(self.next_frame, checker.next_frame)
+            return safe
+        except (_RefinementUnsupported, ValueError, OverflowError):
+            return False
+
+    @classmethod
+    def modular_bounds(cls, lower, upper, width):
+        minimum, maximum = cls.limits(width)
+        modulus = 1 << width
+        first = (lower - minimum) // modulus
+        last = (upper - minimum) // modulus
+        if first != last:
+            return minimum, maximum
+        return lower - first * modulus, upper - first * modulus
 
     @staticmethod
     def limits(width):
@@ -4475,6 +4704,8 @@ class _ReachabilityRefinement:
         return self.integer(signed, signed, width)
 
     def value(self, state, var, scope=None):
+        if isinstance(var, pysvf.ConstFPObjVar):
+            return self.floating_constant(var)
         if isinstance(var, (pysvf.ConstIntValVar, pysvf.ConstIntObjVar)):
             return self.constant(var.getZExtValue(), self.width(var))
         if isinstance(var, (pysvf.ConstNullPtrValVar, pysvf.ConstNullPtrObjVar)):
@@ -4545,6 +4776,9 @@ class _ReachabilityRefinement:
     def condition(self, state, value, truth, depth=0):
         if not isinstance(value, _PathInteger):
             raise _RefinementUnsupported('non-integer condition')
+        if value.token in state.constraints and state.constraints[value.token] != truth:
+            return False
+        state.constraints[value.token] = truth
         lower, upper = self.bounds(value)
         if truth and lower == upper == 0 or not truth and (lower > 0 or upper < 0):
             return False
@@ -4557,6 +4791,8 @@ class _ReachabilityRefinement:
         if value.predicate is None or depth >= 8:
             return True
         predicate, left, right = value.predicate
+        if isinstance(left, _PathFloat):
+            return self.floating_condition(state, predicate, left, right, truth)
         if not truth:
             predicate = self.analysis.NEGATED_ICMP[predicate]
         low_left, high_left = self.bounds(left)
@@ -4591,6 +4827,12 @@ class _ReachabilityRefinement:
     def comparison(self, state, statement):
         left, right = (self.value(state, statement.getOpVar(index)) for index in (0, 1))
         predicate = Predicate(int(statement.getPredicate()))
+        if isinstance(left, _PathFloat) and isinstance(right, _PathFloat) and left.width == right.width and 0 <= int(predicate) <= 15:
+            if re.search(r'\bfcmp\s+(?:fast|reassoc|nnan|ninf|nsz|arcp|contract|afn)\b', statement.getRes().toString()):
+                raise _RefinementUnsupported('unsupported fast-math semantics')
+            lower, upper = self.floating_comparison(int(predicate), left, right)
+            return self.expression(lower, upper, 1, ('fcmp', int(predicate)), (left, right),
+                                   predicate=(predicate, left, right))
         if not isinstance(left, _PathInteger) or not isinstance(right, _PathInteger):
             if predicate not in (Predicate.ICMP_EQ, Predicate.ICMP_NE) or not isinstance(left, tuple) or not isinstance(right, tuple):
                 raise _RefinementUnsupported('unsupported pointer comparison')
@@ -4611,13 +4853,14 @@ class _ReachabilityRefinement:
                       Predicate.ICMP_ULT: (high_left < low_right, low_left >= high_right),
                       Predicate.ICMP_ULE: (high_left <= low_right, low_left > high_right)}
             definitely_true, definitely_false = bounds[predicate]
-            return self.integer(int(definitely_true), int(not definitely_false), 1,
-                                predicate=(predicate, left, right))
+            return self.expression(int(definitely_true), int(not definitely_false), 1,
+                                   ('icmp', int(predicate)), (left, right), predicate=(predicate, left, right))
         signed_predicate = {Predicate.ICMP_UGT: Predicate.ICMP_SGT, Predicate.ICMP_UGE: Predicate.ICMP_SGE,
                             Predicate.ICMP_ULT: Predicate.ICMP_SLT, Predicate.ICMP_ULE: Predicate.ICMP_SLE}.get(predicate, predicate)
         interval = self.analysis.evaluateIntervalComparison(signed_predicate, left.interval, right.interval)
         facts = {} if low_left == high_left and low_right == high_right else {'predicate': (predicate, left, right)}
-        return self.integer(int(interval.lb()), int(interval.ub()), 1, **facts)
+        return self.expression(int(interval.lb()), int(interval.ub()), 1,
+                               ('icmp', int(predicate)), (left, right), **facts)
 
     def execute(self, state, statement, global_init=False):
         if not isinstance(statement, pysvf.PhiStmt):
@@ -4655,11 +4898,24 @@ class _ReachabilityRefinement:
                 if not statement.getLHSVar().getType().isIntegerType() or self.width(statement.getLHSVar()) != value.width:
                     raise _RefinementUnsupported('memory reinterpretation')
                 value = replace(value, cell=cell, version=state.versions[cell])
+            elif isinstance(value, _PathFloat):
+                if self.floating_width(statement.getLHSVar()) != value.width:
+                    raise _RefinementUnsupported('floating memory reinterpretation')
             elif not statement.getLHSVar().getType().isPointerTy():
                 raise _RefinementUnsupported('pointer reinterpretation')
             state.values[statement.getLHSVarID()] = value
         elif isinstance(statement, pysvf.CopyStmt):
             value = self.value(state, statement.getRHSVar())
+            floating_cast = re.search(r'\b(fpext|fptrunc|sitofp|uitofp|fptosi|fptoui)\b', statement.getLHSVar().toString())
+            if floating_cast:
+                if floating_cast.group(1) != 'fpext' or not isinstance(value, _PathFloat):
+                    raise _RefinementUnsupported('unsupported floating conversion')
+                width = self.floating_width(statement.getLHSVar())
+                if value.width != 32 or width != 64:
+                    raise _RefinementUnsupported('unsupported floating extension')
+                state.values[statement.getLHSVarID()] = self.floating(
+                    width, value.lower, value.upper, value.nan, 'fpext', (value,))
+                return
             if statement.isValueCopy():
                 state.values[statement.getLHSVarID()] = value
                 return
@@ -4685,13 +4941,40 @@ class _ReachabilityRefinement:
                 converted = self.integer(lower, upper, target, parent=value, parent_unsigned=True)
             elif operation == 'trunc' and self.limits(target)[0] <= lower <= upper <= self.limits(target)[1]:
                 converted = self.integer(lower, upper, target, parent=value)
+            elif operation == 'trunc':
+                lower, upper = self.modular_bounds(lower, upper, target)
+                converted = self.integer(lower, upper, target)
             else:
                 raise _RefinementUnsupported('non-singleton narrowing cast')
             if value.predicate is not None and value.width == 1:
                 converted = replace(converted, predicate=value.predicate)
+            low_converted, high_converted = self.bounds(converted)
+            identity = self.expression(low_converted, high_converted, target, ('cast', operation), (value,))
+            converted = replace(converted, token=identity.token)
             state.values[statement.getLHSVarID()] = converted
         elif isinstance(statement, pysvf.BinaryOPStmt):
             left, right = (self.value(state, statement.getOpVar(index)) for index in (0, 1))
+            if isinstance(left, _PathFloat) and isinstance(right, _PathFloat) and left.width == right.width:
+                opcode = statement.getOpcode()
+                if opcode not in (OpCode.FAdd, OpCode.FSub, OpCode.FMul, OpCode.FDiv):
+                    raise _RefinementUnsupported('unsupported floating arithmetic')
+                if re.search(r'\b(?:fadd|fsub|fmul|fdiv)\s+(?:fast|reassoc|nnan|ninf|nsz|arcp|contract|afn)\b', statement.getRes().toString()):
+                    raise _RefinementUnsupported('unsupported fast-math semantics')
+                finite = not left.nan and not right.nan and all(math.isfinite(bound) for bound in (
+                    left.lower, left.upper, right.lower, right.upper))
+                nonzero_divisor = right.lower > 0 or right.upper < 0
+                nan = not finite or opcode == OpCode.FDiv and not nonzero_divisor
+                lower, upper = -math.inf, math.inf
+                if finite and (opcode != OpCode.FDiv or nonzero_divisor):
+                    operation = {OpCode.FAdd: operator.add, OpCode.FSub: operator.sub,
+                                 OpCode.FMul: operator.mul, OpCode.FDiv: operator.truediv}[opcode]
+                    corners = [operation(first, second) for first in (left.lower, left.upper)
+                               for second in (right.lower, right.upper)]
+                    lower = self.floating_outward(min(corners), left.width, False)
+                    upper = self.floating_outward(max(corners), left.width, True)
+                state.values[statement.getResId()] = self.floating(
+                    left.width, lower, upper, nan, operation=('binary', int(opcode)), operands=(left, right))
+                return
             if not isinstance(left, _PathInteger) or not isinstance(right, _PathInteger) or left.width != right.width:
                 raise _RefinementUnsupported('non-integer arithmetic')
             opcode = statement.getOpcode()
@@ -4739,7 +5022,8 @@ class _ReachabilityRefinement:
                     upper = min(high_left, magnitude) if high_left > 0 else 0
                 if unsigned:
                     lower, upper = self.signed_bounds(lower, upper, left.width)
-                state.values[statement.getResId()] = self.integer(lower, upper, left.width)
+                state.values[statement.getResId()] = self.expression(
+                    lower, upper, left.width, ('binary', int(opcode)), (left, right))
                 return
             if exact and opcode in (OpCode.And, OpCode.Or, OpCode.Xor):
                 operation = {OpCode.And: operator.and_, OpCode.Or: operator.or_, OpCode.Xor: operator.xor}[opcode]
@@ -4751,7 +5035,8 @@ class _ReachabilityRefinement:
             low, high = self.limits(left.width)
             if result.lb() < pysvf.BoundedInt(low) or result.ub() > pysvf.BoundedInt(high):
                 raise _RefinementUnsupported('possible integer overflow')
-            state.values[statement.getResId()] = self.integer(int(result.lb()), int(result.ub()), left.width)
+            state.values[statement.getResId()] = self.expression(
+                int(result.lb()), int(result.ub()), left.width, ('binary', int(opcode)), (left, right))
         elif isinstance(statement, pysvf.CmpStmt):
             state.values[statement.getResId()] = self.comparison(state, statement)
         elif isinstance(statement, pysvf.CallPE):
@@ -4780,6 +5065,8 @@ class _ReachabilityRefinement:
 
     def exact_signature(self, state):
         def encoded(value):
+            if isinstance(value, _PathFloat):
+                return None
             if isinstance(value, _PathInteger):
                 lower, upper = self.bounds(value)
                 return ('integer', value.width, lower) if lower == upper else None
@@ -4796,7 +5083,7 @@ class _ReachabilityRefinement:
                 state.phi_previous.getId() if state.phi_previous else None, tuple(sorted(phi_values)),
                 state.frame, tuple(frames), tuple(sorted(values)), tuple(sorted(memory)), tuple(sorted(state.sizes.items())))
 
-    def run(self):
+    def run(self, initial=None):
         from invariants import parse_source_location
 
         main = self.pag.getFunObjVar('main')
@@ -4805,14 +5092,15 @@ class _ReachabilityRefinement:
         if any(isinstance(node, pysvf.FunEntryICFGNode) and node.getFun() != main
                and node.getFun().hasAddressTaken() for node in self.graph.getNodes()):
             return False, ['possible indirect entry point']
-        initial = _PathState(self.graph.getFunEntryICFGNode(main))
-        initial.values = self.globals
-        for statement in self.graph.getGlobalICFGNode().getSVFStmts():
-            try:
-                self.execute(initial, statement, global_init=True)
-            except _RefinementUnsupported:
-                pass
-        initial.values = {}
+        if initial is None:
+            initial = _PathState(self.graph.getFunEntryICFGNode(main))
+            initial.values = self.globals
+            for statement in self.graph.getGlobalICFGNode().getSVFStmts():
+                try:
+                    self.execute(initial, statement, global_init=True)
+                except _RefinementUnsupported:
+                    pass
+            initial.values = {}
         pending = [initial]
         while pending:
             if self.steps >= 10000 or len(pending) > 128 or time.process_time() >= self.deadline:
@@ -4821,7 +5109,17 @@ class _ReachabilityRefinement:
             state = pending.pop()
             self.steps += 1
             try:
-                split = next((value for value in state.inputs.values() if 1 < self.bounds(value)[1] - self.bounds(value)[0] + 1 <= 16), None)
+                if self.induction is not None:
+                    key, shape = self.induction
+                    if (state.node.getId(), state.frame) == key:
+                        if state.induction_started:
+                            if self.loop_shape(state) != shape:
+                                raise _RefinementUnsupported('inductive memory shape changed')
+                            continue
+                        state.induction_started = True
+                elif state.node.getFun() is not None and self.inductive_loop(state):
+                    continue
+                split = next((value for value in state.inputs.values() if isinstance(value, _PathInteger) and 1 < self.bounds(value)[1] - self.bounds(value)[0] + 1 <= 16), None)
                 if split is not None:
                     lower, upper = self.bounds(split)
                     for number in range(lower, upper + 1):
@@ -4845,7 +5143,7 @@ class _ReachabilityRefinement:
                         raise _RefinementUnsupported('indirect call')
                     name = callee.getName()
                     if name == 'reach_error':
-                        inputs = list(state.inputs.values())
+                        inputs = [value for value in state.inputs.values() if isinstance(value, _PathInteger)]
                         if inputs and len(inputs) <= 16:
                             for pick in ('lower', 'upper', 'middle'):
                                 choice = []
@@ -4873,6 +5171,14 @@ class _ReachabilityRefinement:
                         appended = location is not None and location['ln'] > self.max_line
                         if callee.isDeclaration() or appended:
                             returned = call.getRetICFGNode().getActualRet()
+                            width = self.floating_width(returned)
+                            if width is not None and not call.getActualParms():
+                                value = self.floating(width)
+                                state.values[returned.getId()] = value
+                                state.inputs[value.token] = value
+                                state.previous, state.node = call, call.getRetICFGNode()
+                                pending.append(state)
+                                continue
                             if returned is None or not returned.getType().isIntegerType() or call.getActualParms():
                                 raise _RefinementUnsupported('non-integer nondeterminism')
                             width = self.width(returned)
