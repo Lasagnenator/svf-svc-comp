@@ -3965,9 +3965,81 @@ class AbstractExecution:
     :param cycle: The WTO cycle containing ICFG nodes to be processed
     :type cycle: ICFGWTOCycle
     """
+    def loopThresholds(self, function):
+        if not getattr(self, 'threshold_widening', False):
+            return ()
+        if not hasattr(self, '_loop_thresholds'):
+            constants = {}
+            for node in self.icfg.getNodes():
+                owner = node.getFun()
+                if owner is None:
+                    continue
+                for statement in node.getSVFStmts():
+                    if not isinstance(statement, pysvf.CmpStmt) or statement.getPredicate() not in self.NEGATED_ICMP:
+                        continue
+                    for index in range(statement.getOpVarNum()):
+                        value = statement.getOpVar(index)
+                        if isinstance(value, (pysvf.ConstIntValVar, pysvf.ConstIntObjVar)):
+                            number = int(value.getSExtValue())
+                            constants.setdefault(owner.getName(), set()).update(
+                                bound for bound in (number - 1, number, number + 1)
+                                if -(1 << 63) <= bound < (1 << 63))
+            self._loop_thresholds = {
+                name: tuple(pysvf.BoundedInt(number) for number in sorted(values))
+                for name, values in constants.items()}
+            self._threshold_integer_ids = {}
+        return self._loop_thresholds.get(function.getName(), ()) if function is not None else ()
+
+    @staticmethod
+    def thresholdInterval(previous, current, widened, thresholds):
+        if previous.isBottom() or current.isBottom() or not previous.is_int() or not current.is_int():
+            return widened
+        lower = min(previous.lb(), current.lb())
+        upper = max(previous.ub(), current.ub())
+        if widened.lb() > lower or widened.ub() < upper:
+            return widened
+        lower_choices = [bound for bound in thresholds if bound <= lower]
+        upper_choices = [bound for bound in thresholds if bound >= upper]
+        lower = max(widened.lb(), lower_choices[-1]) if lower_choices else widened.lb()
+        upper = min(widened.ub(), upper_choices[0]) if upper_choices else widened.ub()
+        return pysvf.IntervalValue(lower, upper)
+
+    def widenLoopState(self, previous, current, thresholds):
+        widened = previous.widening(current)
+        if not thresholds:
+            return widened
+        statistics = self.results.setdefault('threshold_widening', {
+            'widenings': 0, 'refined_intervals': 0, 'threshold_count_max': 0})
+        statistics['widenings'] += 1
+        statistics['threshold_count_max'] = max(statistics['threshold_count_max'], len(thresholds))
+        tables = ((False, previous.getVarToVal(), current.getVarToVal(), widened.getVarToVal()),
+                  (True, previous.getLocToVal(), current.getLocToVal(), widened.getLocToVal()))
+        for memory, old_table, new_table, result_table in tables:
+            for identifier, value in result_table.items():
+                old_value, new_value = old_table.get(identifier), new_table.get(identifier)
+                if (old_value is None or new_value is None or not value.isInterval()
+                        or not old_value.isInterval() or not new_value.isInterval()):
+                    continue
+                variable_id = previous.getIDFromAddr(identifier) if memory else identifier
+                if variable_id not in self._threshold_integer_ids:
+                    variable = self.svfir.getGNode(variable_id)
+                    self._threshold_integer_ids[variable_id] = (
+                        variable is not None and variable.getType().isIntegerType())
+                if not self._threshold_integer_ids[variable_id]:
+                    continue
+                interval = self.thresholdInterval(old_value.getInterval(), new_value.getInterval(), value.getInterval(), thresholds)
+                if not interval.equals(value.getInterval()):
+                    statistics['refined_intervals'] += 1
+                    if memory:
+                        widened.store(identifier, pysvf.AbstractValue(interval))
+                    else:
+                        widened[identifier] = pysvf.AbstractValue(interval)
+        return widened
+
     def handleICFGCycle(self, cycle: ICFGWTOCycle):
         self.registerLoopStackObjects(cycle)
         head = cycle.head.node
+        thresholds = self.loopThresholds(head.getFun())
         increasing = True
         iteration = 0
         narrowing_iters = 0
@@ -4009,7 +4081,7 @@ class AbstractExecution:
                 if increasing:
                     if iteration >= widen_delay:
                         # --- WIDENING PHASE ---
-                        self.post_abs_trace[head] = pre_iteration_as.widening(cur_iteration_as)
+                        self.post_abs_trace[head] = self.widenLoopState(pre_iteration_as, cur_iteration_as, thresholds)
                         self.ae_manager.updateAbsState(head, self.post_abs_trace[head])
 
                         ptr_stable = (len(pre_iteration_ptr_offsets) == len(cur_iteration_ptr_offsets))

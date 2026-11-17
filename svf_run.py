@@ -100,6 +100,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     # ae first
     try:
         ae = AbstractExecution(pag)
+        ae.threshold_widening = prop_file_name == 'unreach-call.prp'
         # Memory verdicts are Unknown on any gap, so stop at a dropped call instead of running on.
         ae.stop_on_gap = prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp')
         ae.analyse()
