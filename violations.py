@@ -11,6 +11,7 @@ writes the segments returned here.
 import operator
 from pathlib import Path
 import re
+import time
 
 from invariants import _source_loops, parse_source_location
 
@@ -100,7 +101,8 @@ def reach_error_segments(reach_results, cfl_reachable_ids, file_name, max_line=N
                    file_name, max_line)
 
 
-def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
+def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64",
+                            nondet_choices=(), proof_status=None, deadline=None):
     """Replay an exact scalar prefix, rejecting unknown values and unsupported operations.
 
     Values retain their SVF type; integers carry both signed and unsigned views.
@@ -113,6 +115,9 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
     main = pag.getFunObjVar("main")
     if main is None:
         return None
+    if any(isinstance(node, pysvf.FunEntryICFGNode) and node.getFun() != main
+           and node.getFun().hasAddressTaken() for node in graph.getNodes()):
+        return None
     globals_values = {}
     values = globals_values
     objects = {}
@@ -121,6 +126,10 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
     frames = []
     frame_id = 0
     next_frame = 1
+    nondet_reads = 0
+    source_nodes = None
+    phi_previous = None
+    phi_values = None
     comparisons = {
         Predicate.ICMP_EQ: operator.eq, Predicate.ICMP_NE: operator.ne,
         Predicate.ICMP_SLT: operator.lt, Predicate.ICMP_SLE: operator.le,
@@ -130,6 +139,41 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
     }
     unsigned = {Predicate.ICMP_ULT, Predicate.ICMP_ULE,
                 Predicate.ICMP_UGT, Predicate.ICMP_UGE}
+
+    def integer_value(number, native_type, width):
+        unsigned_number = number % (1 << width)
+        signed_number = unsigned_number if unsigned_number < (1 << (width - 1)) else unsigned_number - (1 << width)
+        return "integer", (signed_number, unsigned_number), native_type
+
+    def checked_source(target=None):
+        nonlocal source_nodes
+        if re.search(r'^\s*#\s*(?:line\s+)?\d+', Path(file_name).read_text(), re.MULTILINE):
+            return False
+        if source_nodes is None:
+            source_nodes = _source_loops(
+                file_name, ("CallExpr", "CompoundStmt", "ForStmt", "VarDecl", "CompoundLiteralExpr"), bits)
+        for function in visited_functions:
+            members = [entry for entry in source_nodes if entry['linkage_name'] == function]
+            scopes = [entry for entry in members if entry['kind'] in ("CompoundStmt", "ForStmt")]
+            if not scopes:
+                return False
+            for declaration in members:
+                if declaration['kind'] not in ("VarDecl", "CompoundLiteralExpr"):
+                    continue
+                point = (declaration['line'], declaration['column'])
+                if sum((scope['line'], scope['column']) <= point < scope['end'] for scope in scopes) > 1:
+                    return False
+        if target is not None:
+            matches = [call for call in source_nodes if call.get('callee') == 'reach_error'
+                       and (call['line'], call['column']) == (target['line'], target['column'])]
+            if len(matches) != 1:
+                return False
+            target['function'] = matches[0]['function']
+        return True
+
+    def prove_safe(kind):
+        if proof_status is not None and nondet_reads == 0 and checked_source():
+            proof_status.update(safe=True, kind=kind)
 
     def scalar_type(var):
         native_type = var.getType() if var is not None else None
@@ -156,6 +200,10 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
         return value
 
     def execute(statement, global_init=False):
+        nonlocal phi_previous, phi_values
+        if not isinstance(statement, pysvf.PhiStmt):
+            phi_previous = None
+            phi_values = None
         if isinstance(statement, pysvf.AddrStmt):
             rhs = statement.getRHSVar()
             value = value_of(rhs)
@@ -179,6 +227,16 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
                     values[statement.getLHSVarID()] = value
                     return True
                 if value[0] == kind[0] == "integer":
+                    cast = re.search(r'\b(trunc|sext|zext)\s+i(\d+)\b[^\n]*\bto\s+i(\d+)\b', statement.getLHSVar().toString())
+                    if cast:
+                        operation, source_width, result_width = cast.group(1), int(cast.group(2)), int(cast.group(3))
+                        if not (0 < source_width <= 64 and 0 < result_width <= 64):
+                            return False
+                        if kind[1].getByteSize() != (result_width + 7) // 8:
+                            return False
+                        number = value[1][0] if operation == 'sext' else value[1][0] % (1 << source_width)
+                        values[statement.getLHSVarID()] = integer_value(number, kind[1], result_width)
+                        return True
                     signed_value, unsigned_value = value[1]
                     if statement.isZext() and unsigned_value is not None:
                         values[statement.getLHSVarID()] = (
@@ -190,6 +248,33 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
                         return True
             values[statement.getLHSVarID()] = None
             return global_init
+        if isinstance(statement, pysvf.BinaryOPStmt):
+            left = value_of(statement.getOpVar(0))
+            right = value_of(statement.getOpVar(1))
+            kind = scalar_type(statement.getRes())
+            if (left is None or right is None or kind is None or kind[0] != 'integer'
+                    or (left[0], left[2]) != kind or (right[0], right[2]) != kind):
+                return False
+            operations = {pysvf.OpCode.Add: ('add', operator.add), pysvf.OpCode.Sub: ('sub', operator.sub),
+                          pysvf.OpCode.Mul: ('mul', operator.mul), pysvf.OpCode.And: ('and', operator.and_),
+                          pysvf.OpCode.Or: ('or', operator.or_), pysvf.OpCode.Xor: ('xor', operator.xor)}
+            operation = operations.get(statement.getOpcode())
+            if operation is None:
+                return False
+            instruction = re.search(r'\b' + operation[0] + r'\s+((?:(?:nsw|nuw)\s+)*)i(\d+)\b', statement.getRes().toString())
+            if instruction is None:
+                return False
+            flags, width = instruction.group(1).split(), int(instruction.group(2))
+            if not 0 < width <= 64 or kind[1].getByteSize() != (width + 7) // 8:
+                return False
+            signed_result = operation[1](left[1][0], right[1][0])
+            unsigned_result = operation[1](left[1][0] % (1 << width), right[1][0] % (1 << width))
+            if 'nsw' in flags and not -(1 << (width - 1)) <= signed_result < (1 << (width - 1)):
+                return False
+            if 'nuw' in flags and not 0 <= unsigned_result < (1 << width):
+                return False
+            values[statement.getResId()] = integer_value(unsigned_result, kind[1], width)
+            return True
         if isinstance(statement, pysvf.StoreStmt):
             pointer = value_of(statement.getLHSVar())
             value = value_of(statement.getRHSVar())
@@ -246,8 +331,27 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
             value = value_of(pag.getGNode(statement.getOpVarId(operands[0])), caller_values)
             values[statement.getResId()] = value
             return value is not None
-        if isinstance(statement, pysvf.PhiStmt) and statement.getOpVarNum() == 1:
-            value = value_of(statement.getOpVar(0))
+        if isinstance(statement, pysvf.PhiStmt):
+            if phi_values is None:
+                phi_previous = previous
+                phi_values = values.copy()
+            operands = [index for index in range(statement.getOpVarNum())
+                        if statement.getOpICFGNode(index) == phi_previous]
+            if statement.getOpVarNum() == 1:
+                operands = [0]
+            if len(operands) != 1:
+                return False
+            value = value_of(statement.getOpVar(operands[0]), phi_values)
+            values[statement.getResId()] = value
+            return value is not None
+        if isinstance(statement, pysvf.RetPE):
+            return value_of(statement.getLHSVar()) is not None
+        if isinstance(statement, pysvf.SelectStmt):
+            condition = value_of(statement.getCondition())
+            if condition is None or condition[0] != 'integer' or condition[1][1] not in (0, 1):
+                return False
+            selected = statement.getTrueValue() if condition[1][1] else statement.getFalseValue()
+            value = value_of(selected)
             values[statement.getResId()] = value
             return value is not None
         if isinstance(statement, pysvf.BranchStmt):
@@ -266,47 +370,54 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
     visited = set()
     visited_functions = set()
     for _ in range(5000):
+        if deadline is not None and time.process_time() >= deadline:
+            return None
         if node is None:
             return None
         context = (node.getId(), tuple(call.getId() for call, _, _ in frames))
-        if context in visited:
+        state = (context, tuple(sorted(values.items())), tuple(sorted(globals_values.items())),
+                 tuple(sorted(memory.items())), tuple(sorted(objects.items())), tuple(sorted(readonly_objects)),
+                 tuple((call.getId(), scope, tuple(sorted(caller.items()))) for call, caller, scope in frames), frame_id)
+        if state in visited:
+            prove_safe('exact-state loop invariant')
             return None
-        visited.add(context)
+        visited.add(state)
         if node.getFun() is not None:
             visited_functions.add(node.getFun().getName())
-        for object_id in analysis.scope_exit_objects.get((previous, node), set()):
-            objects.pop((object_id, frame_id), None)
-            memory.pop((object_id, frame_id), None)
+        if analysis.scope_exit_objects.get((previous, node)) and not checked_source():
+            return None
         if not all(execute(statement) for statement in node.getSVFStmts()):
             return None
         if isinstance(node, pysvf.CallICFGNode):
             callee = node.getCalledFunction()
             if callee is not None and callee.getName() == "reach_error":
                 segments = _target([(False, node)], file_name, max_line)
-                if segments is None or re.search(r'^\s*#\s*(?:line\s+)?\d+',
-                                                  Path(file_name).read_text(), re.MULTILINE):
+                if segments is None:
                     return None
                 target = segments[0][0]
-                source_nodes = _source_loops(
-                    file_name, ("CallExpr", "CompoundStmt", "ForStmt", "VarDecl", "CompoundLiteralExpr"), bits)
-                for function in visited_functions:
-                    members = [entry for entry in source_nodes if entry['linkage_name'] == function]
-                    scopes = [entry for entry in members if entry['kind'] in ("CompoundStmt", "ForStmt")]
-                    if not scopes:
-                        return None
-                    for declaration in members:
-                        if declaration['kind'] not in ("VarDecl", "CompoundLiteralExpr"):
-                            continue
-                        point = (declaration['line'], declaration['column'])
-                        if sum((scope['line'], scope['column']) <= point < scope['end']
-                               for scope in scopes) > 1:
-                            return None
-                matches = [call for call in source_nodes if call.get('callee') == 'reach_error'
-                           and (call['line'], call['column']) == (target['line'], target['column'])]
-                if len(matches) == 1:
-                    target['function'] = matches[0]['function']
+                if checked_source(target):
                     return segments
                 return None
+            if callee is not None and nondet_choices and callee.getName().startswith('__VERIFIER_nondet_'):
+                location = None if callee.isDeclaration() else parse_source_location(
+                    graph.getFunEntryICFGNode(callee).getSourceLoc())
+                appended = location is not None and max_line is not None and location['ln'] > max_line
+                if callee.isDeclaration() or appended:
+                    returned = node.getRetICFGNode().getActualRet()
+                    kind = scalar_type(returned)
+                    instruction = re.search(r'\bcall\b[^\n]*?\bi(\d+)\s+@', returned.toString()) if returned else None
+                    if kind is None or kind[0] != 'integer' or instruction is None or node.getActualParms():
+                        return None
+                    width = int(instruction.group(1))
+                    if not 0 < width <= 64 or kind[1].getByteSize() != (width + 7) // 8:
+                        return None
+                    chosen = nondet_choices[nondet_reads % len(nondet_choices)]
+                    if callee.getName() == '__VERIFIER_nondet_bool' and chosen not in (0, 1):
+                        return None
+                    values[returned.getId()] = integer_value(chosen, kind[1], width)
+                    nondet_reads += 1
+                    previous, node = node, node.getRetICFGNode()
+                    continue
             if callee is None or callee.isDeclaration() or pysvf.isExtCall(callee):
                 return None
             if callee == main or any(call.getCalledFunction() == callee for call, _, _ in frames):
@@ -319,11 +430,16 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64"):
             continue
         if isinstance(node, pysvf.FunExitICFGNode):
             if not frames:
+                prove_safe('complete exact path')
                 return None
+            call = frames[-1][0]
+            returns = [(statement.getLHSVarID(), value_of(statement.getRHSVar()))
+                       for statement in call.getRetICFGNode().getSVFStmts() if isinstance(statement, pysvf.RetPE)]
             for address in [address for address in objects if address[1] == frame_id]:
                 objects.pop(address)
                 memory.pop(address, None)
             call, values, frame_id = frames.pop()
+            values.update(returns)
             previous, node = node, call.getRetICFGNode()
             continue
         edges = list(node.getOutEdges())

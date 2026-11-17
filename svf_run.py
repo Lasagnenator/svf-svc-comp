@@ -8,6 +8,7 @@ import generate_witness
 import invariants
 import violations
 import importlib.metadata
+import time
 
 import nondet
 from util import *
@@ -223,6 +224,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             log(f"  gap: {reason}", category=Log.REACH)
 
         proof_segments = None
+        refinement = None
         if feasible_ids:
             if not claim_violations:
                 try:
@@ -230,7 +232,28 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                         ae, pag, input_file_path, input_line_count, bits)
                 except (AttributeError, RuntimeError, TypeError, ValueError) as error:
                     log(f"Exact path check unavailable: {error}", category=Log.REACH)
-            if claim_violations or proof_segments:
+                if not proof_segments:
+                    refinement = ae.refineReachability(input_file_path, input_line_count, bits)
+                    log(f"Reachability refinement: {refinement}", category=Log.REACH)
+                    if not refinement['safe']:
+                        deadline = time.process_time() + 0.35
+                        for choices in refinement['input_candidates']:
+                            if time.process_time() >= deadline:
+                                break
+                            try:
+                                proof_segments = violations.definite_reach_segments(
+                                    ae, pag, input_file_path, input_line_count, bits,
+                                    nondet_choices=choices, deadline=deadline)
+                            except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+                                log(f"Guided path check unavailable: {error}", category=Log.REACH)
+                                break
+                            if proof_segments:
+                                log(f"Guided exact path uses inputs {choices}.", category=Log.REACH)
+                                break
+            if refinement and refinement['safe']:
+                verdict = "REACH Correct"
+                correctness = "Correct"
+            elif claim_violations or proof_segments:
                 if proof_segments:
                     log("Exact scalar path reaches reach_error.", category=Log.REACH)
                 verdict = "REACH Incorrect"
@@ -306,8 +329,11 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     if "Correct" in correctness and "Incorrect" not in correctness:
         with open(prop_file_path) as f:
             spec = f.read().strip()
-        loop_invariants = invariants.extract_loop_invariants(
-            ae, pag, input_file_path, input_line_count)
+        if prop_file_name == 'unreach-call.prp' and refinement and refinement['safe']:
+            loop_invariants = []
+        else:
+            loop_invariants = invariants.extract_loop_invariants(
+                ae, pag, input_file_path, input_line_count)
         log(f"Exported {len(loop_invariants)} loop invariant(s).", category=Log.SETUP)
         generate_witness.write_witness(
             loop_invariants, [input_file_path], spec, witness_file_path, witness_format,

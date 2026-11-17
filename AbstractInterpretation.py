@@ -1,9 +1,12 @@
 from abc import abstractmethod
+from dataclasses import dataclass, field, replace
 
 from pysvf import ICFG, ICFGNode
 from typing import List, Dict, Set, Optional
 import pysvf
 import re
+import operator
+import time
 import faulthandler
 faulthandler.enable()
 from util import *
@@ -618,6 +621,19 @@ class AbstractExecution:
         self.results["doublefree"] = []
         self.results["badfree"] = []
         self.results["invaliddereference"] = []
+
+    def refineReachability(self, source, max_line, bits="64", budget=1.0):
+        """Check unresolved reachability with bounded disjunctive scalar states."""
+        refinement = _ReachabilityRefinement(self, source, max_line, bits, budget)
+        try:
+            safe, gaps = refinement.run()
+            result = {"safe": safe, "gaps": gaps, "steps": refinement.steps,
+                      "input_candidates": refinement.input_candidates}
+        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError) as error:
+            result = {"safe": False, "gaps": [str(error)], "steps": refinement.steps,
+                      "input_candidates": []}
+        self.results["reach_refinement"] = result
+        return result
 
     """
     Initialize the WTO (Weak topological order) for each function.
@@ -2232,23 +2248,27 @@ class AbstractExecution:
         ptr_offsets[mem_key] = pysvf.AbstractValue(refined)
         ptr_offsets[canon_key] = pysvf.AbstractValue(refined)
 
+    @staticmethod
+    def refineOrderedBounds(predicate, lo0, hi0, lo1, hi1, one=1):
+        if predicate in (Predicate.ICMP_SLT, Predicate.ICMP_ULT):
+            return lo0, min(hi0, hi1 - one), max(lo1, lo0 + one), hi1
+        if predicate in (Predicate.ICMP_SLE, Predicate.ICMP_ULE):
+            return lo0, min(hi0, hi1), max(lo1, lo0), hi1
+        if predicate in (Predicate.ICMP_SGT, Predicate.ICMP_UGT):
+            return max(lo0, lo1 + one), hi0, lo1, min(hi1, hi0 - one)
+        if predicate in (Predicate.ICMP_SGE, Predicate.ICMP_UGE):
+            return max(lo0, lo1), hi0, lo1, min(hi1, hi0)
+        return None
+
     def refineIntervalPair(self, predicate, i0, i1):
         """Given `i0 <predicate> i1` holds, return narrowed (i0, i1), or (None, None)."""
         one = pysvf.BoundedInt(1)
         lo0, hi0, lo1, hi1 = i0.lb(), i0.ub(), i1.lb(), i1.ub()
 
-        if predicate in (Predicate.ICMP_SLT, Predicate.ICMP_ULT):      # i0 < i1
-            return (IntervalValue(lo0, min(hi0, hi1 - one)),
-                    IntervalValue(max(lo1, lo0 + one), hi1))
-        if predicate in (Predicate.ICMP_SLE, Predicate.ICMP_ULE):      # i0 <= i1
-            return (IntervalValue(lo0, min(hi0, hi1)),
-                    IntervalValue(max(lo1, lo0), hi1))
-        if predicate in (Predicate.ICMP_SGT, Predicate.ICMP_UGT):      # i0 > i1
-            return (IntervalValue(max(lo0, lo1 + one), hi0),
-                    IntervalValue(lo1, min(hi1, hi0 - one)))
-        if predicate in (Predicate.ICMP_SGE, Predicate.ICMP_UGE):      # i0 >= i1
-            return (IntervalValue(max(lo0, lo1), hi0),
-                    IntervalValue(lo1, min(hi1, hi0)))
+        bounds = self.refineOrderedBounds(predicate, lo0, hi0, lo1, hi1, one)
+        if bounds is not None:
+            lower0, upper0, lower1, upper1 = bounds
+            return IntervalValue(lower0, upper0), IntervalValue(lower1, upper1)
         if predicate == Predicate.ICMP_EQ:        # both sides collapse to the overlap
             meet = i0.clone()
             meet.meet_with(i1)
@@ -2636,6 +2656,31 @@ class AbstractExecution:
                            f"{self.valueKind(v0)} vs {self.valueKind(v1)}")
         return IntervalValue(0, 1)
 
+    INTERVAL_COMPARISONS = {
+        Predicate.ICMP_EQ: IntervalValue.eq_interval,
+        Predicate.FCMP_OEQ: IntervalValue.eq_interval,
+        Predicate.FCMP_UEQ: IntervalValue.eq_interval,
+        Predicate.ICMP_NE: IntervalValue.ne_interval,
+        Predicate.FCMP_ONE: IntervalValue.ne_interval,
+        Predicate.FCMP_UNE: IntervalValue.ne_interval,
+        Predicate.ICMP_SGT: operator.gt,
+        Predicate.FCMP_OGT: operator.gt,
+        Predicate.FCMP_UGT: operator.gt,
+        Predicate.ICMP_SGE: operator.ge,
+        Predicate.FCMP_OGE: operator.ge,
+        Predicate.FCMP_UGE: operator.ge,
+        Predicate.ICMP_SLT: operator.lt,
+        Predicate.FCMP_OLT: operator.lt,
+        Predicate.FCMP_ULT: operator.lt,
+        Predicate.ICMP_SLE: operator.le,
+        Predicate.FCMP_OLE: operator.le,
+        Predicate.FCMP_ULE: operator.le,
+    }
+
+    @classmethod
+    def evaluateIntervalComparison(cls, predicate, left, right):
+        return cls.INTERVAL_COMPARISONS[predicate](left, right)
+
     def updateStateOnCmp(self, cmp: pysvf.CmpStmt):
         node = cmp.getICFGNode()
         abstract_state = self.post_abs_trace[node]
@@ -2663,18 +2708,8 @@ class AbstractExecution:
             lhs = abstract_state[op0.getId()].getInterval()
             rhs = abstract_state[op1.getId()].getInterval()
             predicate = cmp.getPredicate()
-            if predicate == Predicate.ICMP_EQ or predicate == Predicate.FCMP_OEQ or predicate == Predicate.FCMP_UEQ:
-                res_val = lhs.eq_interval(rhs)
-            elif predicate == Predicate.ICMP_NE or predicate == Predicate.FCMP_ONE or predicate == Predicate.FCMP_UNE:
-                res_val = lhs.ne_interval(rhs)
-            elif predicate == Predicate.ICMP_SGT or predicate == Predicate.FCMP_OGT or predicate == Predicate.FCMP_UGT:
-                res_val = (lhs  > rhs)
-            elif predicate == Predicate.ICMP_SGE or predicate == Predicate.FCMP_OGE or predicate == Predicate.FCMP_UGE:
-                res_val = (lhs >= rhs)
-            elif predicate == Predicate.ICMP_SLT or predicate == Predicate.FCMP_OLT or predicate == Predicate.FCMP_ULT:
-                res_val = (lhs < rhs)
-            elif predicate == Predicate.ICMP_SLE or predicate == Predicate.FCMP_OLE or predicate == Predicate.FCMP_ULE:
-                res_val = (lhs <= rhs)
+            if predicate in self.INTERVAL_COMPARISONS:
+                res_val = self.evaluateIntervalComparison(predicate, lhs, rhs)
             elif (predicate == Predicate.ICMP_UGT or predicate == Predicate.ICMP_UGE or
                   predicate == Predicate.ICMP_ULT or predicate == Predicate.ICMP_ULE):
                 res_val = self.unsignedCompare(predicate, lhs, rhs)
@@ -3219,6 +3254,16 @@ class AbstractExecution:
                 return IntervalValue(c, c)
         return None
 
+    @staticmethod
+    def evaluateIntervalArithmetic(opcode, left, right):
+        if opcode in (OpCode.Add, OpCode.FAdd):
+            return left + right
+        if opcode in (OpCode.Sub, OpCode.FSub):
+            return left - right
+        if opcode in (OpCode.Mul, OpCode.FMul):
+            return left * right
+        raise ValueError(f"Unsupported shared arithmetic opcode: {opcode}")
+
     def updateStateOnBinary(self, binary: pysvf.BinaryOPStmt):
         try:
             node = binary.getICFGNode()
@@ -3295,12 +3340,8 @@ class AbstractExecution:
                 return
 
             result = IntervalValue(0)
-            if opcode == OpCode.Add or opcode == OpCode.FAdd:
-                result = val1 + val2
-            elif opcode == OpCode.Sub or opcode == OpCode.FSub:
-                result = val1 - val2
-            elif opcode == OpCode.Mul or opcode == OpCode.FMul:
-                result = val1 * val2
+            if opcode in (OpCode.Add, OpCode.FAdd, OpCode.Sub, OpCode.FSub, OpCode.Mul, OpCode.FMul):
+                result = self.evaluateIntervalArithmetic(opcode, val1, val2)
             elif opcode == OpCode.UDiv or opcode == OpCode.SDiv or opcode == OpCode.FDiv:
                 if val2.isTop() or (val2.ub() >= pysvf.BoundedInt(0) and val2.lb() <= pysvf.BoundedInt(0)):
                     result = IntervalValue.top()
@@ -4244,3 +4285,574 @@ class AbstractExecution:
                 self.recordMemoryGap(
                     f"May dereference expired/freed storage at node {node.getId()}"
                 )
+
+
+class _RefinementUnsupported(Exception):
+    pass
+
+
+@dataclass(frozen=True, eq=False)
+class _PathInteger:
+    interval: object
+    width: int
+    token: int
+    cell: object = None
+    version: int = 0
+    predicate: object = None
+    parent: object = None
+    parent_unsigned: bool = False
+
+
+@dataclass
+class _PathState:
+    node: object
+    previous: object = None
+    values: dict = field(default_factory=dict)
+    memory: dict = field(default_factory=dict)
+    sizes: dict = field(default_factory=dict)
+    versions: dict = field(default_factory=dict)
+    readonly: set = field(default_factory=set)
+    frames: list = field(default_factory=list)
+    frame: int = 0
+    visits: set = field(default_factory=set)
+    phi_previous: object = None
+    phi_values: object = None
+    inputs: dict = field(default_factory=dict)
+
+    def clone(self):
+        return _PathState(self.node, self.previous, self.values.copy(), self.memory.copy(), self.sizes.copy(),
+                          self.versions.copy(), self.readonly.copy(), list(self.frames), self.frame,
+                          set(self.visits), self.phi_previous, self.phi_values, self.inputs.copy())
+
+
+class _ReachabilityRefinement:
+    """Path-local proof state; never overwrite the primary WTO or memory traces."""
+
+    def __init__(self, analysis, source, max_line, bits, budget):
+        self.analysis = analysis
+        self.pag = analysis.svfir
+        self.graph = analysis.icfg
+        self.source = source
+        self.max_line = max_line
+        self.bits = bits
+        self.deadline = time.process_time() + budget
+        self.serial = 0
+        self.next_frame = 1
+        self.globals = {}
+        self.source_nodes = None
+        self.checked_functions = set()
+        self.gaps = set()
+        self.steps = 0
+        self.input_candidates = []
+        self.width_cache = {}
+
+    def integer(self, lower, upper, width, **facts):
+        self.serial += 1
+        return _PathInteger(IntervalValue(int(lower), int(upper)), width, self.serial, **facts)
+
+    @staticmethod
+    def limits(width):
+        return (0, 1) if width == 1 else (-(1 << (width - 1)), (1 << (width - 1)) - 1)
+
+    @staticmethod
+    def bounds(value):
+        return int(value.interval.lb()), int(value.interval.ub())
+
+    def unsigned_bounds(self, value):
+        lower, upper = self.bounds(value)
+        if lower >= 0:
+            return lower, upper
+        if upper < 0:
+            return lower + (1 << value.width), upper + (1 << value.width)
+        return 0, (1 << value.width) - 1
+
+    def signed_bounds(self, lower, upper, width):
+        midpoint = 1 << (width - 1)
+        if width == 1 or upper < midpoint:
+            return lower, upper
+        if lower >= midpoint:
+            return lower - (1 << width), upper - (1 << width)
+        return self.limits(width)
+
+    def width(self, var):
+        identifier = var.getId()
+        if identifier in self.width_cache:
+            return self.width_cache[identifier]
+        for line in var.toString().splitlines():
+            assignment = re.match(r'\s*%(?:"(?:[^"\\]|\\.)*"|[-a-zA-Z$._0-9]+)\s*=\s*(.*)', line)
+            if assignment:
+                instruction = assignment.group(1)
+                if re.match(r'(?:icmp|fcmp)\b', instruction):
+                    self.width_cache[identifier] = 1
+                    return 1
+                if re.match(r'(?:trunc|sext|zext)\b', instruction):
+                    match = re.search(r'\bto\s+i(\d+)\b\s*(?:,|$)', instruction)
+                else:
+                    match = re.search(r'\bi(\d+)\b', instruction)
+            else:
+                match = re.match(r'\s*i(\d+)\b', line)
+            if match is not None and 0 < int(match.group(1)) <= 64:
+                width = int(match.group(1))
+                self.width_cache[identifier] = width
+                return width
+        raise _RefinementUnsupported('unavailable exact integer width')
+
+    def constant(self, number, width):
+        unsigned = number % (1 << width)
+        signed = unsigned if width == 1 or unsigned < (1 << (width - 1)) else unsigned - (1 << width)
+        return self.integer(signed, signed, width)
+
+    def value(self, state, var, scope=None):
+        if isinstance(var, (pysvf.ConstIntValVar, pysvf.ConstIntObjVar)):
+            return self.constant(var.getZExtValue(), self.width(var))
+        if isinstance(var, (pysvf.ConstNullPtrValVar, pysvf.ConstNullPtrObjVar)):
+            return ('pointer', None)
+        values = state.values if scope is None else scope
+        value = values.get(var.getId(), self.globals.get(var.getId()))
+        if value is None:
+            raise _RefinementUnsupported('undefined value')
+        if isinstance(value, tuple) and value[0] == 'pointer' and value[1] is not None and value[1] not in state.sizes:
+            raise _RefinementUnsupported('expired pointer value')
+        return value
+
+    def location(self, state, pointer):
+        if not isinstance(pointer, tuple) or pointer[0] != 'pointer' or pointer[1] not in state.sizes:
+            raise _RefinementUnsupported('unknown or expired pointer')
+        return pointer[1]
+
+    def checked_function(self, function):
+        from invariants import _source_loops
+
+        name = function.getName()
+        if name in self.checked_functions:
+            return
+        if self.source_nodes is None:
+            self.source_nodes = _source_loops(self.source, ('CallExpr', 'CompoundStmt', 'ForStmt', 'VarDecl', 'CompoundLiteralExpr'), self.bits)
+        members = [entry for entry in self.source_nodes if entry['linkage_name'] == name]
+        scopes = [entry for entry in members if entry['kind'] in ('CompoundStmt', 'ForStmt')]
+        if not scopes:
+            raise _RefinementUnsupported('unverified source scope')
+        for declaration in members:
+            if declaration['kind'] in ('VarDecl', 'CompoundLiteralExpr'):
+                point = (declaration['line'], declaration['column'])
+                if sum((scope['line'], scope['column']) <= point < scope['end'] for scope in scopes) > 1:
+                    raise _RefinementUnsupported('nested local storage')
+        self.checked_functions.add(name)
+
+    def narrow(self, state, value, lower, upper):
+        old_lower, old_upper = self.bounds(value)
+        lower, upper = max(old_lower, lower), min(old_upper, upper)
+        aliases = list(state.values.values()) + list(state.memory.values()) + list(state.inputs.values())
+        aliases += [current for _, caller, _ in state.frames for current in caller.values()]
+        for current in aliases:
+            if isinstance(current, _PathInteger) and current.token == value.token:
+                current_lower, current_upper = self.bounds(current)
+                lower, upper = max(lower, current_lower), min(upper, current_upper)
+        if lower > upper:
+            return False
+        if value.parent is not None:
+            parent_lower, parent_upper = self.signed_bounds(lower, upper, value.parent.width) if value.parent_unsigned else (lower, upper)
+            if not self.narrow(state, value.parent, parent_lower, parent_upper):
+                return False
+        narrowed = replace(value, interval=IntervalValue(lower, upper))
+        if value.token in state.inputs:
+            state.inputs[value.token] = narrowed
+        for identifier, current in list(state.values.items()):
+            if isinstance(current, _PathInteger) and current.token == value.token:
+                state.values[identifier] = replace(current, interval=narrowed.interval.clone())
+        for cell, current in list(state.memory.items()):
+            if isinstance(current, _PathInteger) and current.token == value.token:
+                if value.cell != cell or state.versions.get(cell) == value.version:
+                    state.memory[cell] = replace(current, interval=narrowed.interval.clone())
+        state.frames = [(call, {identifier: replace(current, interval=narrowed.interval.clone())
+                               if isinstance(current, _PathInteger) and current.token == value.token else current
+                               for identifier, current in caller.items()}, frame)
+                        for call, caller, frame in state.frames]
+        return True
+
+    def condition(self, state, value, truth, depth=0):
+        if not isinstance(value, _PathInteger):
+            raise _RefinementUnsupported('non-integer condition')
+        lower, upper = self.bounds(value)
+        if truth and lower == upper == 0 or not truth and (lower > 0 or upper < 0):
+            return False
+        if truth and lower == 0 and not self.narrow(state, value, 1, upper):
+            return False
+        if truth and upper == 0 and not self.narrow(state, value, lower, -1):
+            return False
+        if not truth and not self.narrow(state, value, 0, 0):
+            return False
+        if value.predicate is None or depth >= 8:
+            return True
+        predicate, left, right = value.predicate
+        if not truth:
+            predicate = self.analysis.NEGATED_ICMP[predicate]
+        low_left, high_left = self.bounds(left)
+        low_right, high_right = self.bounds(right)
+        if predicate in (Predicate.ICMP_EQ, Predicate.ICMP_NE) and low_right == high_right == 0 and left.predicate is not None:
+            return self.condition(state, left, predicate == Predicate.ICMP_NE, depth + 1)
+        unsigned = predicate in self.analysis.UNSIGNED_ICMP
+        if unsigned:
+            low_left, high_left = self.unsigned_bounds(left)
+            low_right, high_right = self.unsigned_bounds(right)
+        if predicate == Predicate.ICMP_EQ:
+            shared_low, shared_high = max(low_left, low_right), min(high_left, high_right)
+            return self.narrow(state, left, shared_low, shared_high) and self.narrow(state, right, shared_low, shared_high)
+        if predicate == Predicate.ICMP_NE:
+            if left.token == right.token or low_left == high_left == low_right == high_right:
+                return False
+            if low_right == high_right:
+                if low_left == low_right:
+                    low_left += 1
+                elif high_left == low_right:
+                    high_left -= 1
+            return self.narrow(state, left, low_left, high_left)
+        low_left, high_left, low_right, high_right = self.analysis.refineOrderedBounds(
+            predicate, low_left, high_left, low_right, high_right)
+        if low_left > high_left or low_right > high_right:
+            return False
+        if unsigned:
+            low_left, high_left = self.signed_bounds(low_left, high_left, left.width)
+            low_right, high_right = self.signed_bounds(low_right, high_right, right.width)
+        return self.narrow(state, left, low_left, high_left) and self.narrow(state, right, low_right, high_right)
+
+    def comparison(self, state, statement):
+        left, right = (self.value(state, statement.getOpVar(index)) for index in (0, 1))
+        predicate = Predicate(int(statement.getPredicate()))
+        if not isinstance(left, _PathInteger) or not isinstance(right, _PathInteger):
+            if predicate not in (Predicate.ICMP_EQ, Predicate.ICMP_NE) or not isinstance(left, tuple) or not isinstance(right, tuple):
+                raise _RefinementUnsupported('unsupported pointer comparison')
+            result = left == right if predicate == Predicate.ICMP_EQ else left != right
+            return self.integer(int(result), int(result), 1)
+        if left.width != right.width or predicate not in self.analysis.NEGATED_ICMP:
+            raise _RefinementUnsupported('unsupported comparison')
+        if left.token == right.token and predicate in (Predicate.ICMP_EQ, Predicate.ICMP_NE):
+            result = predicate == Predicate.ICMP_EQ
+            return self.integer(int(result), int(result), 1)
+        low_left, high_left = self.bounds(left)
+        low_right, high_right = self.bounds(right)
+        if predicate in self.analysis.UNSIGNED_ICMP and (low_left < 0 or low_right < 0):
+            low_left, high_left = self.unsigned_bounds(left)
+            low_right, high_right = self.unsigned_bounds(right)
+            bounds = {Predicate.ICMP_UGT: (low_left > high_right, high_left <= low_right),
+                      Predicate.ICMP_UGE: (low_left >= high_right, high_left < low_right),
+                      Predicate.ICMP_ULT: (high_left < low_right, low_left >= high_right),
+                      Predicate.ICMP_ULE: (high_left <= low_right, low_left > high_right)}
+            definitely_true, definitely_false = bounds[predicate]
+            return self.integer(int(definitely_true), int(not definitely_false), 1,
+                                predicate=(predicate, left, right))
+        signed_predicate = {Predicate.ICMP_UGT: Predicate.ICMP_SGT, Predicate.ICMP_UGE: Predicate.ICMP_SGE,
+                            Predicate.ICMP_ULT: Predicate.ICMP_SLT, Predicate.ICMP_ULE: Predicate.ICMP_SLE}.get(predicate, predicate)
+        interval = self.analysis.evaluateIntervalComparison(signed_predicate, left.interval, right.interval)
+        facts = {} if low_left == high_left and low_right == high_right else {'predicate': (predicate, left, right)}
+        return self.integer(int(interval.lb()), int(interval.ub()), 1, **facts)
+
+    def execute(self, state, statement, global_init=False):
+        if not isinstance(statement, pysvf.PhiStmt):
+            state.phi_previous = None
+            state.phi_values = None
+        if isinstance(statement, pysvf.AddrStmt):
+            try:
+                value = self.value(state, statement.getRHSVar())
+            except _RefinementUnsupported:
+                obj = self.pag.getBaseObject(statement.getRHSVarID())
+                if obj is None or not (obj.isStack() or obj.isGlobalObj()) or not obj.isConstantByteSize():
+                    raise _RefinementUnsupported('unsupported allocation')
+                cell = (obj.getId(), state.frame if obj.isStack() else -1)
+                state.sizes[cell] = obj.getByteSizeOfObj()
+                if obj.isConstDataOrConstGlobal():
+                    state.readonly.add(cell)
+                value = ('pointer', cell)
+            state.values[statement.getLHSVarID()] = value
+        elif isinstance(statement, pysvf.StoreStmt):
+            cell = self.location(state, self.value(state, statement.getLHSVar()))
+            if not global_init and cell in state.readonly:
+                raise _RefinementUnsupported('readonly store')
+            state.memory.pop(cell, None)
+            value = self.value(state, statement.getRHSVar())
+            if statement.getRHSVar().getType().getByteSize() != state.sizes[cell]:
+                raise _RefinementUnsupported('partial or aggregate store')
+            state.versions[cell] = state.versions.get(cell, 0) + 1
+            state.memory[cell] = value
+        elif isinstance(statement, pysvf.LoadStmt):
+            cell = self.location(state, self.value(state, statement.getRHSVar()))
+            if cell not in state.memory or statement.getLHSVar().getType().getByteSize() != state.sizes[cell]:
+                raise _RefinementUnsupported('uninitialized or partial load')
+            value = state.memory[cell]
+            if isinstance(value, _PathInteger):
+                if not statement.getLHSVar().getType().isIntegerType() or self.width(statement.getLHSVar()) != value.width:
+                    raise _RefinementUnsupported('memory reinterpretation')
+                value = replace(value, cell=cell, version=state.versions[cell])
+            elif not statement.getLHSVar().getType().isPointerTy():
+                raise _RefinementUnsupported('pointer reinterpretation')
+            state.values[statement.getLHSVarID()] = value
+        elif isinstance(statement, pysvf.CopyStmt):
+            value = self.value(state, statement.getRHSVar())
+            if statement.isValueCopy():
+                state.values[statement.getLHSVarID()] = value
+                return
+            if not isinstance(value, _PathInteger):
+                raise _RefinementUnsupported('pointer cast')
+            cast = re.search(r'\b(trunc|sext|zext)\s+i(\d+)\b[^\n]*\bto\s+i(\d+)\b', statement.getLHSVar().toString())
+            if cast is None or value.width != int(cast.group(2)):
+                raise _RefinementUnsupported('unsupported cast')
+            operation, target = cast.group(1), int(cast.group(3))
+            if not 0 < target <= 64:
+                raise _RefinementUnsupported('wide integer cast')
+            lower, upper = self.bounds(value)
+            if lower == upper:
+                number = -lower if operation == 'sext' and value.width == 1 else lower
+                if operation == 'zext':
+                    number %= 1 << value.width
+                converted = self.constant(number, target)
+            elif operation == 'sext':
+                lower, upper = (-upper, -lower) if value.width == 1 else (lower, upper)
+                converted = self.integer(lower, upper, target, parent=value if value.width != 1 else None)
+            elif operation == 'zext':
+                lower, upper = self.unsigned_bounds(value)
+                converted = self.integer(lower, upper, target, parent=value, parent_unsigned=True)
+            elif operation == 'trunc' and self.limits(target)[0] <= lower <= upper <= self.limits(target)[1]:
+                converted = self.integer(lower, upper, target, parent=value)
+            else:
+                raise _RefinementUnsupported('non-singleton narrowing cast')
+            if value.predicate is not None and value.width == 1:
+                converted = replace(converted, predicate=value.predicate)
+            state.values[statement.getLHSVarID()] = converted
+        elif isinstance(statement, pysvf.BinaryOPStmt):
+            left, right = (self.value(state, statement.getOpVar(index)) for index in (0, 1))
+            if not isinstance(left, _PathInteger) or not isinstance(right, _PathInteger) or left.width != right.width:
+                raise _RefinementUnsupported('non-integer arithmetic')
+            opcode = statement.getOpcode()
+            low_left, high_left = self.bounds(left)
+            low_right, high_right = self.bounds(right)
+            exact = low_left == high_left and low_right == high_right
+            names = {OpCode.Add: 'add', OpCode.Sub: 'sub', OpCode.Mul: 'mul'}
+            if exact and opcode in names:
+                operation = {OpCode.Add: operator.add, OpCode.Sub: operator.sub, OpCode.Mul: operator.mul}[opcode]
+                signed = operation(low_left, low_right)
+                unsigned = operation(low_left % (1 << left.width), low_right % (1 << right.width))
+                flags = re.search(r'\b' + names[opcode] + r'\s+((?:(?:nsw|nuw)\s+)*)i\d+\b', statement.getRes().toString())
+                if flags is None:
+                    raise _RefinementUnsupported('unavailable arithmetic flags')
+                minimum, maximum = self.limits(left.width)
+                if 'nsw' in flags.group(1) and not minimum <= signed <= maximum:
+                    raise _RefinementUnsupported('signed overflow')
+                if 'nuw' in flags.group(1) and not 0 <= unsigned < (1 << left.width):
+                    raise _RefinementUnsupported('unsigned overflow')
+                state.values[statement.getResId()] = self.constant(unsigned, left.width)
+                return
+            divisions = (OpCode.SDiv, OpCode.UDiv, OpCode.SRem, OpCode.URem)
+            if opcode in divisions:
+                unsigned = opcode in (OpCode.UDiv, OpCode.URem)
+                if unsigned:
+                    low_left, high_left = self.unsigned_bounds(left)
+                    low_right, high_right = self.unsigned_bounds(right)
+                if low_right <= 0 <= high_right:
+                    raise _RefinementUnsupported('possible division by zero')
+                if not unsigned and low_left == self.limits(left.width)[0] and low_right <= -1 <= high_right:
+                    raise _RefinementUnsupported('possible signed division overflow')
+
+                def quotient(first, second):
+                    magnitude = abs(first) // abs(second)
+                    return -magnitude if (first < 0) != (second < 0) else magnitude
+
+                if opcode in (OpCode.SDiv, OpCode.UDiv):
+                    corners = [quotient(first, second) for first in (low_left, high_left) for second in (low_right, high_right)]
+                    lower, upper = min(corners), max(corners)
+                elif exact:
+                    lower = upper = low_left - quotient(low_left, low_right) * low_right
+                else:
+                    magnitude = max(abs(low_right), abs(high_right)) - 1
+                    lower = -min(abs(low_left), magnitude) if low_left < 0 else 0
+                    upper = min(high_left, magnitude) if high_left > 0 else 0
+                if unsigned:
+                    lower, upper = self.signed_bounds(lower, upper, left.width)
+                state.values[statement.getResId()] = self.integer(lower, upper, left.width)
+                return
+            if exact and opcode in (OpCode.And, OpCode.Or, OpCode.Xor):
+                operation = {OpCode.And: operator.and_, OpCode.Or: operator.or_, OpCode.Xor: operator.xor}[opcode]
+                state.values[statement.getResId()] = self.constant(operation(low_left, low_right), left.width)
+                return
+            if opcode not in names:
+                raise _RefinementUnsupported('unsupported arithmetic')
+            result = self.analysis.evaluateIntervalArithmetic(opcode, left.interval, right.interval)
+            low, high = self.limits(left.width)
+            if result.lb() < pysvf.BoundedInt(low) or result.ub() > pysvf.BoundedInt(high):
+                raise _RefinementUnsupported('possible integer overflow')
+            state.values[statement.getResId()] = self.integer(int(result.lb()), int(result.ub()), left.width)
+        elif isinstance(statement, pysvf.CmpStmt):
+            state.values[statement.getResId()] = self.comparison(state, statement)
+        elif isinstance(statement, pysvf.CallPE):
+            if not state.frames:
+                raise _RefinementUnsupported('unmatched call parameter')
+            call, caller, _ = state.frames[-1]
+            matches = [index for index in range(statement.getOpVarNum()) if statement.getOpCallICFGNode(index) == call]
+            if len(matches) != 1:
+                raise _RefinementUnsupported('ambiguous call parameter')
+            state.values[statement.getResId()] = self.value(state, statement.getOpVar(matches[0]), caller)
+        elif isinstance(statement, pysvf.PhiStmt):
+            if state.phi_values is None:
+                state.phi_previous = state.previous
+                state.phi_values = state.values.copy()
+            matches = [index for index in range(statement.getOpVarNum()) if statement.getOpICFGNode(index) == state.phi_previous]
+            if statement.getOpVarNum() == 1:
+                matches = [0]
+            if len(matches) != 1:
+                raise _RefinementUnsupported('ambiguous PHI predecessor')
+            state.values[statement.getResId()] = self.value(state, statement.getOpVar(matches[0]), state.phi_values)
+        elif isinstance(statement, pysvf.RetPE):
+            if statement.getLHSVarID() not in state.values:
+                raise _RefinementUnsupported('unavailable return value')
+        elif not isinstance(statement, pysvf.BranchStmt):
+            raise _RefinementUnsupported('unsupported ' + type(statement).__name__)
+
+    def exact_signature(self, state):
+        def encoded(value):
+            if isinstance(value, _PathInteger):
+                lower, upper = self.bounds(value)
+                return ('integer', value.width, lower) if lower == upper else None
+            return value
+
+        values = [(identifier, encoded(value)) for identifier, value in state.values.items()]
+        memory = [(cell, encoded(value)) for cell, value in state.memory.items()]
+        phi_values = [(identifier, encoded(value)) for identifier, value in (state.phi_values or {}).items()]
+        frames = [(call.getId(), scope, tuple(sorted((identifier, encoded(value)) for identifier, value in caller.items())))
+                  for call, caller, scope in state.frames]
+        if any(value is None for _, value in values + memory + phi_values) or any(value is None for _, _, caller in frames for _, value in caller):
+            return None
+        return (state.node.getId(), state.previous.getId() if state.previous else None,
+                state.phi_previous.getId() if state.phi_previous else None, tuple(sorted(phi_values)),
+                state.frame, tuple(frames), tuple(sorted(values)), tuple(sorted(memory)), tuple(sorted(state.sizes.items())))
+
+    def run(self):
+        from invariants import parse_source_location
+
+        main = self.pag.getFunObjVar('main')
+        if main is None:
+            return False, ['missing main']
+        if any(isinstance(node, pysvf.FunEntryICFGNode) and node.getFun() != main
+               and node.getFun().hasAddressTaken() for node in self.graph.getNodes()):
+            return False, ['possible indirect entry point']
+        initial = _PathState(self.graph.getFunEntryICFGNode(main))
+        initial.values = self.globals
+        for statement in self.graph.getGlobalICFGNode().getSVFStmts():
+            try:
+                self.execute(initial, statement, global_init=True)
+            except _RefinementUnsupported:
+                pass
+        initial.values = {}
+        pending = [initial]
+        while pending:
+            if self.steps >= 10000 or len(pending) > 128 or time.process_time() >= self.deadline:
+                self.gaps.add('path budget')
+                break
+            state = pending.pop()
+            self.steps += 1
+            try:
+                split = next((value for value in state.inputs.values() if 1 < self.bounds(value)[1] - self.bounds(value)[0] + 1 <= 16), None)
+                if split is not None:
+                    lower, upper = self.bounds(split)
+                    for number in range(lower, upper + 1):
+                        alternative = state.clone()
+                        if self.narrow(alternative, split, number, number):
+                            pending.append(alternative)
+                    continue
+                signature = self.exact_signature(state)
+                if signature is not None:
+                    if signature in state.visits:
+                        continue
+                    state.visits.add(signature)
+                if isinstance(state.node, pysvf.FunEntryICFGNode):
+                    self.checked_function(state.node.getFun())
+                for statement in state.node.getSVFStmts():
+                    self.execute(state, statement)
+                if isinstance(state.node, pysvf.CallICFGNode):
+                    call = state.node
+                    callee = call.getCalledFunction()
+                    if callee is None:
+                        raise _RefinementUnsupported('indirect call')
+                    name = callee.getName()
+                    if name == 'reach_error':
+                        inputs = list(state.inputs.values())
+                        if inputs and len(inputs) <= 16:
+                            for pick in ('lower', 'upper', 'middle'):
+                                choice = []
+                                for value in inputs:
+                                    lower, upper = self.bounds(value)
+                                    choice.append(lower if pick == 'lower' else upper if pick == 'upper' else (lower + upper) // 2)
+                                choice = tuple(choice)
+                                if choice not in self.input_candidates and len(self.input_candidates) < 8:
+                                    self.input_candidates.append(choice)
+                        raise _RefinementUnsupported('possible error on an interval path')
+                    if callee.isDeclaration() and name in ('abort', 'exit', '_Exit'):
+                        continue
+                    if callee.isDeclaration() and name in ('__VERIFIER_assume', 'llvm.assume'):
+                        arguments = call.getActualParms()
+                        if len(arguments) != 1:
+                            raise _RefinementUnsupported('unrecognized assume signature')
+                        if not self.condition(state, self.value(state, arguments[0]), True):
+                            continue
+                        state.previous, state.node = call, call.getRetICFGNode()
+                        pending.append(state)
+                        continue
+                    if name.startswith('__VERIFIER_nondet_'):
+                        location = None if callee.isDeclaration() else parse_source_location(
+                            self.graph.getFunEntryICFGNode(callee).getSourceLoc())
+                        appended = location is not None and location['ln'] > self.max_line
+                        if callee.isDeclaration() or appended:
+                            returned = call.getRetICFGNode().getActualRet()
+                            if returned is None or not returned.getType().isIntegerType() or call.getActualParms():
+                                raise _RefinementUnsupported('non-integer nondeterminism')
+                            width = self.width(returned)
+                            lower, upper = self.limits(width)
+                            if name in ('__VERIFIER_nondet_bool', '__VERIFIER_nondet__Bool'):
+                                lower, upper = 0, 1
+                            value = self.integer(lower, upper, width)
+                            state.values[returned.getId()] = value
+                            state.inputs[value.token] = value
+                            state.previous, state.node = call, call.getRetICFGNode()
+                            pending.append(state)
+                            continue
+                    if callee.isDeclaration() or pysvf.isExtCall(callee):
+                        raise _RefinementUnsupported('external ' + name)
+                    if callee == main or len(state.frames) >= 16 or any(frame[0].getCalledFunction() == callee for frame in state.frames):
+                        raise _RefinementUnsupported('recursion')
+                    state.frames.append((call, state.values, state.frame))
+                    state.values = {}
+                    state.frame = self.next_frame
+                    self.next_frame += 1
+                    state.previous, state.node = call, self.graph.getFunEntryICFGNode(callee)
+                    pending.append(state)
+                    continue
+                if isinstance(state.node, pysvf.FunExitICFGNode):
+                    if not state.frames:
+                        continue
+                    call = state.frames[-1][0]
+                    returned = [(statement.getLHSVarID(), self.value(state, statement.getRHSVar()))
+                                for statement in call.getRetICFGNode().getSVFStmts() if isinstance(statement, pysvf.RetPE)]
+                    for cell in [cell for cell in state.sizes if cell[1] == state.frame]:
+                        state.sizes.pop(cell)
+                        state.memory.pop(cell, None)
+                    _, state.values, state.frame = state.frames.pop()
+                    state.values = state.values.copy()
+                    state.values.update(returned)
+                    state.previous, state.node = state.node, call.getRetICFGNode()
+                    pending.append(state)
+                    continue
+                edges = list(state.node.getOutEdges())
+                for edge in edges:
+                    if not edge.isIntraCFGEdge():
+                        raise _RefinementUnsupported('unmatched interprocedural edge')
+                    next_state = state.clone()
+                    if edge.getCondition() is not None:
+                        successor = edge.getSuccessorCondValue()
+                        condition = self.value(next_state, edge.getCondition())
+                        if successor not in (0, 1) or not isinstance(condition, _PathInteger) or condition.width != 1:
+                            raise _RefinementUnsupported('switch dispatch')
+                        if not self.condition(next_state, condition, bool(successor)):
+                            continue
+                    next_state.previous, next_state.node = state.node, edge.getDstNode()
+                    pending.append(next_state)
+            except (_RefinementUnsupported, ValueError, OverflowError) as error:
+                self.gaps.add(str(error))
+        return not self.gaps, sorted(self.gaps)
