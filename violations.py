@@ -398,6 +398,16 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64",
                 if checked_source(target):
                     return segments
                 return None
+            if (callee is not None and callee.isDeclaration()
+                    and callee.getName() in ('__VERIFIER_assume', 'llvm.assume')):
+                arguments = node.getActualParms()
+                if len(arguments) != 1:
+                    return None
+                condition = value_of(arguments[0])
+                if condition is None or condition[0] != 'integer' or condition[1][0] == 0:
+                    return None
+                previous, node = node, node.getRetICFGNode()
+                continue
             if callee is not None and nondet_choices and callee.getName().startswith('__VERIFIER_nondet_'):
                 location = None if callee.isDeclaration() else parse_source_location(
                     graph.getFunEntryICFGNode(callee).getSourceLoc())
