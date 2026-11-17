@@ -7,7 +7,6 @@ import tempfile
 import generate_witness
 import invariants
 import violations
-import re
 import importlib.metadata
 
 import nondet
@@ -38,28 +37,6 @@ def main():
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
     runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
-
-# Reach only. When the AE result is Unknown, the chance of error in reporting its verdict
-# Gaps (paths the AE dropped) when it found no feasible reach_error: chance the task is
-# really FALSE.
-GAP_ERROR = {
-    'external call not modelled': 0.318,
-    'reach_error sites in functions the analysis never entered': 0.053,
-    'recursive function body not analysed': 0.500,
-    'unmodelled comparison': 0.250,
-    'unresolved indirect call': 0.250,
-    'Binary op': 0.333,
-}
-
-FEASIBLE_FALSE_ERROR = 0.836
-FEASIBLE_TRUE_ERROR = 0.004
-
-# Report the AE verdict when the certainty it is right is above this.
-MIN_CERTAINTY = 1.00
-
-def gap_kind(reason):
-    """The reason without node ids, names or values."""
-    return re.sub(r"[:\[].*| at node.*| \d.*", "", reason)
 
 # Accepts a C source file, and traverses its ICFG using the SVF framework
 def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
@@ -123,6 +100,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
     # ae first
     try:
         ae = AbstractExecution(pag)
+        ae.threshold_widening = prop_file_name == 'unreach-call.prp'
         # Memory verdicts are Unknown on any gap, so stop at a dropped call instead of running on.
         ae.stop_on_gap = prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp')
         ae.analyse()
@@ -181,16 +159,21 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         proven_dead = getattr(ae, "unreachable_nodes", set())
         calls_by_function = {}
         indirect_callers = set()
+        entry_roots = {"main", None}
 
         for call in pag.getICFG().getNodes():
+            if isinstance(call, pysvf.FunEntryICFGNode):
+                function = call.getFun()
+                if function is not None and function.hasAddressTaken():
+                    entry_roots.add(function.getName())
             if not isinstance(call, pysvf.CallICFGNode):
                 continue
 
             caller = call.getFun()
-            if caller is None or call in proven_dead:
+            caller_name = caller.getName() if caller is not None else None
+            if caller_name in analysed and call in proven_dead:
                 continue
 
-            caller_name = caller.getName()
             callee = call.getCalledFunction()
 
             if callee is None:
@@ -200,8 +183,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                     callee.getName()
                 )
 
-        possibly_entered = set(analysed)
-        worklist = list(analysed)
+        possibly_entered = set(analysed) | entry_roots
+        worklist = list(possibly_entered)
 
         while worklist:
             function = worklist.pop()
@@ -225,7 +208,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             if holder is None or holder not in analysed:
                 # Never trust propagated deadness inside a function
                 # that AE never actually analysed.
-                unreached.add(n.getId())
+                if holder is None or has_unknown_targets or holder in possibly_entered:
+                    unreached.add(n.getId())
             elif n not in proven_dead:
                 unreached.add(n.getId())
         log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
@@ -259,27 +243,6 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         else:
             verdict = "REACH Correct"
             correctness = "Correct"
-
-        if correctness == "Unknown":
-            # Each gap, and an unproven feasible site, is an independent chance of error.
-            errors = {kind: GAP_ERROR.get(kind, 1.0) for kind in map(gap_kind, gaps)}
-            safe = True
-            if feasible_ids:
-                loops = len(re.findall(r"\b(?:while|for)\s*\(", c_code))
-                floats = re.search(r"\b(?:float|double)\b", c_code) is not None
-                if len(feasible_ids) == 1 and loops == 1 and floats:
-                    errors["feasible reach_error, reporting TRUE"] = FEASIBLE_TRUE_ERROR
-                else:
-                    errors["feasible reach_error, reporting FALSE"] = FEASIBLE_FALSE_ERROR
-                    safe = False
-            certainty = 1.0
-            for error in errors.values():
-                certainty *= 1.0 - error
-            log(f"Certainty of {'TRUE' if safe else 'FALSE'}: {certainty:.0%} from errors {errors}",
-                category=Log.REACH)
-            if certainty > MIN_CERTAINTY:
-                verdict, correctness = (("REACH Correct", "Correct") if safe
-                                        else ("REACH Incorrect", "Incorrect"))
 
     elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
             ae.results.get("incomplete") or ae.results.get("memory_gaps")
