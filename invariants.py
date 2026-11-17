@@ -154,7 +154,8 @@ def _source_loops(file_name, node_kinds=("ForStmt", "WhileStmt", "DoStmt"), bits
     source = Path(file_name).resolve()
     command = ["clang-21", "-x", "c", "-fsyntax-only", "-Xclang", "-ast-dump=json"]
     if "CallExpr" in node_kinds:
-        command.extend(("-Werror", "-Wcast-qual"))
+        command.extend(("-Werror", "-Wcast-qual", "-Wno-error=unknown-attributes",
+                        "-Wno-error=tautological-constant-out-of-range-compare"))
     if bits is not None:
         command.append(f"-m{bits}")
     command.append(str(source))

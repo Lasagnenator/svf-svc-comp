@@ -18,7 +18,14 @@ import pysvf
 from AbstractInterpretation import AbstractExecution
 pysvf.buildSVFModule([sys.argv[2]])
 analysis = AbstractExecution(pysvf.getPAG())
-result = analysis.refineReachability(sys.argv[1], len(Path(sys.argv[1]).read_text().splitlines()), sys.argv[3], 2.0)
+if sys.argv[4] == 'exact':
+    from violations import definite_reach_segments
+    status = {}
+    segments = definite_reach_segments(analysis, analysis.svfir, sys.argv[1],
+                                      len(Path(sys.argv[1]).read_text().splitlines()), sys.argv[3], proof_status=status)
+    result = {'violation': bool(segments), 'safe': status.get('safe', False)}
+else:
+    result = analysis.refineReachability(sys.argv[1], len(Path(sys.argv[1]).read_text().splitlines()), sys.argv[3], 2.0)
 print('PROOF_RESULT=' + json.dumps(result))
 pysvf.releasePAG()
 """
@@ -53,6 +60,61 @@ class SymbolicInductionTests(unittest.TestCase):
                        if line.startswith('PROOF_RESULT=')]
             self.assertEqual(len(records), 1, completed.stdout)
             return json.loads(records[0])
+
+    def test_return_phi_uses_completed_value(self):
+        prefix = '''extern void reach_error(void);
+extern int __VERIFIER_nondet_int(void);
+_Bool choose(int value) { return value>0 && value<2; }
+'''
+        for bits in ('32', '64'):
+            for unsafe in (False, True):
+                for mode in ('refine', 'exact'):
+                    with self.subTest(bits=bits, unsafe=unsafe, mode=mode):
+                        condition = 'answer==1' if unsafe else 'answer<0 || answer>1'
+                        initial = '__VERIFIER_nondet_int()' if mode == 'refine' else '1'
+                        source = prefix + 'int main(void) { int value=' + initial + '; int answer=choose(value); if(' + condition + ') reach_error(); }'
+                        result = self.run_program(source, bits, mode)
+                        self.assertEqual(result['safe'], not unsafe, result)
+                        if mode == 'exact':
+                            self.assertEqual(result['violation'], unsafe, result)
+                        else:
+                            self.assertNotIn('undefined value', result['gaps'])
+
+    def test_source_scope_accepts_benign_compiler_warnings(self):
+        source = '''extern void reach_error(void);
+extern int __VERIFIER_nondet_int(void);
+extern void metadata(const char *) __attribute__((__access__(__read_only__,1)));
+int main(void) {
+    unsigned short fixed=7;
+    int value=__VERIFIER_nondet_int();
+    if(fixed< -25 || value<0 || value>3) return 0;
+    if(value>3) reach_error();
+    return 0;
+}
+'''
+        for bits in ('32', '64'):
+            for unsafe in (False, True):
+                with self.subTest(bits=bits, unsafe=unsafe):
+                    result = self.run_program(source.replace('if(value>3)', 'if(value==2)') if unsafe else source,
+                                              bits, 'refine')
+                    self.assertEqual(result['safe'], not unsafe, result)
+                    self.assertNotIn('unverified source scope', result['gaps'])
+
+    def test_source_scope_still_rejects_semantic_warnings(self):
+        from invariants import _source_loops
+
+        programs = (
+            'int main(void) { const int value=1; int *pointer=(int *)&value; return *pointer; }',
+            'int main(void) { int value=0; return value++ + value++; }',
+            'int main(void) { return missing_variable; }',
+        )
+        with tempfile.TemporaryDirectory(prefix='svf-scope-warnings-') as directory:
+            source = Path(directory) / 'control.c'
+            for bits in ('32', '64'):
+                for program in programs:
+                    with self.subTest(bits=bits, program=program):
+                        source.write_text(program)
+                        self.assertEqual(_source_loops(source, ('CallExpr', 'CompoundStmt', 'VarDecl'), bits), [])
 
     def test_refinement_modular_narrowing(self):
         from AbstractInterpretation import _ReachabilityRefinement

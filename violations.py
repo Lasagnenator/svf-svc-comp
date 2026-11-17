@@ -341,7 +341,9 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64",
                 operands = [0]
             if len(operands) != 1:
                 return False
-            value = value_of(statement.getOpVar(operands[0]), phi_values)
+            scope = values if statement.getOpVarNum() == 1 and re.search(
+                r'(?m)^\s*ret\b', statement.toString()) else phi_values
+            value = value_of(statement.getOpVar(operands[0]), scope)
             values[statement.getResId()] = value
             return value is not None
         if isinstance(statement, pysvf.RetPE):

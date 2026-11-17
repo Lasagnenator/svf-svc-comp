@@ -5056,7 +5056,9 @@ class _ReachabilityRefinement:
                 matches = [0]
             if len(matches) != 1:
                 raise _RefinementUnsupported('ambiguous PHI predecessor')
-            state.values[statement.getResId()] = self.value(state, statement.getOpVar(matches[0]), state.phi_values)
+            scope = state.values if statement.getOpVarNum() == 1 and re.search(
+                r'(?m)^\s*ret\b', statement.toString()) else state.phi_values
+            state.values[statement.getResId()] = self.value(state, statement.getOpVar(matches[0]), scope)
         elif isinstance(statement, pysvf.RetPE):
             if statement.getLHSVarID() not in state.values:
                 raise _RefinementUnsupported('unavailable return value')
