@@ -1922,10 +1922,26 @@ class AbstractExecution:
                 
             # Extract variables required by Phi statements at this merge block
             phi_op_vars = set()
-            for stmt in block.getSVFStmts():
-                if isinstance(stmt, pysvf.PhiStmt):
-                    for i in range(stmt.getOpVarNum()):
-                        phi_op_vars.add(stmt.getOpVar(i).getId())
+            phi_node = block
+            phi_nodes_seen = set()
+            while phi_node not in phi_nodes_seen:
+                phi_nodes_seen.add(phi_node)
+                phis = [stmt for stmt in phi_node.getSVFStmts() if isinstance(stmt, pysvf.PhiStmt)]
+                if not phis:
+                    break
+                for phi in phis:
+                    for operand in range(phi.getOpVarNum()):
+                        phi_op_vars.add(phi.getOpVar(operand).getId())
+                successors = list(phi_node.getOutEdges())
+                if len(successors) != 1:
+                    break
+                edge = successors[0]
+                if not edge.isIntraCFGEdge() or edge.getCondition() is not None:
+                    break
+                successor = edge.getDstNode()
+                if successor.getFun() != block.getFun() or len(list(successor.getInEdges())) != 1:
+                    break
+                phi_node = successor
                 
             # Filter variables: keep if in common_vars, a phi operand, or a global/constant/heap
             for var_id, val in abstract_state.getVarToVal().items():
