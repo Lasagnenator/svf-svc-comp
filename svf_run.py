@@ -226,7 +226,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
 
         proof_segments = None
         refinement = None
-        if feasible_ids:
+        if feasible_ids or gaps:
             if not claim_violations:
                 try:
                     proof_segments = violations.definite_reach_segments(
@@ -254,7 +254,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             if refinement and refinement['safe']:
                 verdict = "REACH Correct"
                 correctness = "Correct"
-            elif claim_violations or proof_segments:
+            elif (claim_violations and feasible_ids) or proof_segments:
                 if proof_segments:
                     log("Exact scalar path reaches reach_error.", category=Log.REACH)
                 verdict = "REACH Incorrect"

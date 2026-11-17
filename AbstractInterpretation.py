@@ -4887,8 +4887,8 @@ class _ReachabilityRefinement:
                             continue
                     if callee.isDeclaration() or pysvf.isExtCall(callee):
                         raise _RefinementUnsupported('external ' + name)
-                    if callee == main or len(state.frames) >= 16 or any(frame[0].getCalledFunction() == callee for frame in state.frames):
-                        raise _RefinementUnsupported('recursion')
+                    if callee == main or len(state.frames) >= 16:
+                        raise _RefinementUnsupported('call depth budget')
                     state.frames.append((call, state.values, state.frame))
                     state.values = {}
                     state.frame = self.next_frame

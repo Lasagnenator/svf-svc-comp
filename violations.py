@@ -430,7 +430,8 @@ def definite_reach_segments(analysis, pag, file_name, max_line=None, bits="64",
                     continue
             if callee is None or callee.isDeclaration() or pysvf.isExtCall(callee):
                 return None
-            if callee == main or any(call.getCalledFunction() == callee for call, _, _ in frames):
+            if callee == main or (len(frames) >= 16 and any(
+                    call.getCalledFunction() == callee for call, _, _ in frames)):
                 return None
             frames.append((node, values, frame_id))
             values = {}
