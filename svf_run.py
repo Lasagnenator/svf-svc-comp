@@ -158,16 +158,21 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         proven_dead = getattr(ae, "unreachable_nodes", set())
         calls_by_function = {}
         indirect_callers = set()
+        entry_roots = {"main", None}
 
         for call in pag.getICFG().getNodes():
+            if isinstance(call, pysvf.FunEntryICFGNode):
+                function = call.getFun()
+                if function is not None and function.hasAddressTaken():
+                    entry_roots.add(function.getName())
             if not isinstance(call, pysvf.CallICFGNode):
                 continue
 
             caller = call.getFun()
-            if caller is None or call in proven_dead:
+            caller_name = caller.getName() if caller is not None else None
+            if caller_name in analysed and call in proven_dead:
                 continue
 
-            caller_name = caller.getName()
             callee = call.getCalledFunction()
 
             if callee is None:
@@ -177,8 +182,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
                     callee.getName()
                 )
 
-        possibly_entered = set(analysed)
-        worklist = list(analysed)
+        possibly_entered = set(analysed) | entry_roots
+        worklist = list(possibly_entered)
 
         while worklist:
             function = worklist.pop()
@@ -202,7 +207,8 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             if holder is None or holder not in analysed:
                 # Never trust propagated deadness inside a function
                 # that AE never actually analysed.
-                unreached.add(n.getId())
+                if holder is None or has_unknown_targets or holder in possibly_entered:
+                    unreached.add(n.getId())
             elif n not in proven_dead:
                 unreached.add(n.getId())
         log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
