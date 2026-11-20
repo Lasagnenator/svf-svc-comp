@@ -57,23 +57,16 @@ class WTOCycleDepth:
     def __repr__(self):
         return f"{self._heads}"
 
-    def compare(self, other):
-        if self == other:
-            return 0
-        this_it = iter(self)
-        other_it = iter(other)
-        while this_it:
-            if not other_it:
-                return 1
-            elif this_it == other_it:
-                this_it = next(this_it)
-                other_it = next(other_it)
-            else:
+    def compare(self, other: 'WTOCycleDepth') -> int:
+        # A depth is ordered before its descendants, but sibling depths are incomparable.
+        for this_head, other_head in zip(self._heads, other._heads):
+            if this_head != other_head:
                 return 2
-        if not other_it:
-            return 0
-        else:
+        if len(self._heads) < len(other._heads):
             return -1
+        if len(self._heads) > len(other._heads):
+            return 1
+        return 0
 
     def __lt__(self, other):
         return self.compare(other) == -1
@@ -82,10 +75,12 @@ class WTOCycleDepth:
         return self.compare(other) <= 0
 
     def __eq__(self, other):
+        if not isinstance(other, WTOCycleDepth):
+            return NotImplemented
         return self.compare(other) == 0
 
     def __ge__(self, other):
-        return self.compare(other) >= 0
+        return self.compare(other) in (0, 1)
 
     def __gt__(self, other):
         return self.compare(other) == 1
@@ -395,12 +390,13 @@ class AbstractExecutionHelper:
         srcId = src.getId()
         elemSize = 1
         if isinstance(dst, pysvf.ValVar):
-            if dst.getType().isArrayTy():
-                elemSize = dst.getType().getTypeOfElement().getByteSize()
-            elif dst.getType().isPointerTy():
+            dst_type = dst.getType()
+            if dst_type.isArrayTy():
+                elemSize = dst_type.asArrayType().getTypeOfElement().getByteSize()
+            elif dst_type.isPointerTy():
                 elemType = self.ae_manager.getPointeeElement(dst, node)
                 if elemType.isArrayTy():
-                    elemSize = elemType.getTypeOfElement().getByteSize()
+                    elemSize = elemType.asArrayType().getTypeOfElement().getByteSize()
                 else:
                     elemSize = elemType.getByteSize()
             else:
@@ -1423,7 +1419,7 @@ class AbstractExecution:
         """Record that the analysis gave up"""
         self.results["incomplete"].append(reason)
 
-    def recordMemoryGap(self, reason: str, node: pysvf.ICFGNode = None):
+    def recordMemoryGap(self, reason: str, node: Optional[pysvf.ICFGNode] = None):
         """Record a memory error that may happen but is not proven"""
         # Global initialisers are compiler-generated constants, so a gap there comes from
         # lost offsets rather than from the program's own memory accesses.
@@ -1866,7 +1862,7 @@ class AbstractExecution:
                         src_lifetime[obj_id] = Lifetime.MAY_FREED
 
                 edge_feasible = False
-                state_for_intersect = None
+                state_for_intersect = src_state
 
                 if isinstance(edge, pysvf.IntraCFGEdge):
                     if edge.getCondition():
@@ -1889,13 +1885,11 @@ class AbstractExecution:
                         self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                         in_edge_num += 1
                         edge_feasible = True
-                        state_for_intersect = src_state
                 else:
                     abstract_state.joinWith(src_state)
                     self.joinPtrOffsetMaps(merged_ptr_offsets, src_ptr_offsets)
                     in_edge_num += 1
                     edge_feasible = True
-                    state_for_intersect = src_state
 
                 if edge_feasible:
                     feasible_pointer_init_states.append(src_pointer_init.copy())
@@ -1938,7 +1932,7 @@ class AbstractExecution:
                 if len(successors) != 1:
                     break
                 edge = successors[0]
-                if not edge.isIntraCFGEdge() or edge.getCondition() is not None:
+                if not isinstance(edge, pysvf.IntraCFGEdge) or edge.getCondition() is not None:
                     break
                 successor = edge.getDstNode()
                 if successor.getFun() != block.getFun() or len(list(successor.getInEdges())) != 1:
@@ -2048,6 +2042,8 @@ class AbstractExecution:
 
     def isBranchFeasible(self, intraEdge: pysvf.IntraCFGEdge, abstractState:  pysvf.AbstractState) -> bool :
         cmp_var = intraEdge.getCondition()
+        if cmp_var is None:
+            return True
         condition = abstractState.getVar(cmp_var.getId())
         successor = intraEdge.getSuccessorCondValue()
         if condition.isInterval():
@@ -2168,8 +2164,9 @@ class AbstractExecution:
 
                 if off0 and off1 and off0.isInterval() and off1.isInterval():
                     # Mathematically slice the offset intervals based on the comparison
-                    r0, r1 = self.refineIntervalPair(predicate, off0.getInterval(), off1.getInterval())
-                    if r0 is not None:
+                    refined_pair = self.refineIntervalPair(predicate, off0.getInterval(), off1.getInterval())
+                    if refined_pair is not None:
+                        r0, r1 = refined_pair
                         if self.intervalIsEmpty(r0) or self.intervalIsEmpty(r1):
                             return False # Mathematically dead branch
 
@@ -2195,9 +2192,10 @@ class AbstractExecution:
         if predicate in self.UNSIGNED_ICMP and not (i0.lb() >= zero and i1.lb() >= zero):
             return True
 
-        r0, r1 = self.refineIntervalPair(predicate, i0, i1)
-        if r0 is None:
+        refined_pair = self.refineIntervalPair(predicate, i0, i1)
+        if refined_pair is None:
             return True
+        r0, r1 = refined_pair
         if self.intervalIsEmpty(r0) or self.intervalIsEmpty(r1):
             return False
 
@@ -2234,8 +2232,10 @@ class AbstractExecution:
         ptr_offsets[mem_key] = pysvf.AbstractValue(refined)
         ptr_offsets[canon_key] = pysvf.AbstractValue(refined)
 
-    def refineIntervalPair(self, predicate, i0, i1):
-        """Given `i0 <predicate> i1` holds, return narrowed (i0, i1), or (None, None)."""
+    def refineIntervalPair(
+        self, predicate: Predicate, i0: IntervalValue, i1: IntervalValue
+    ) -> Optional[tuple[IntervalValue, IntervalValue]]:
+        """Given `i0 <predicate> i1` holds, return narrowed (i0, i1), or None."""
         one = pysvf.BoundedInt(1)
         lo0, hi0, lo1, hi1 = i0.lb(), i0.ub(), i1.lb(), i1.ub()
 
@@ -2269,7 +2269,7 @@ class AbstractExecution:
                 elif hi1 == hi0:
                     n1 = IntervalValue(lo1, hi1 - one)
             return (n0, n1)
-        return (None, None)
+        return None
 
     def loadReachesCmpUnmodified(self, load, cmp, max_steps: int = 8) -> bool:
         """True when `load` reaches `cmp` on one straight-line chain with no intervening store."""
@@ -2686,7 +2686,6 @@ class AbstractExecution:
                 res_val = IntervalValue(1,1)
             abstract_state[res] = AbstractValue(res_val)
         elif v0.isAddr() and v1.isAddr():
-            res_val = None
             lhs = abstract_state[op0.getId()]
             rhs = abstract_state[op1.getId()]
             predicate = cmp.getPredicate()
@@ -2743,7 +2742,7 @@ class AbstractExecution:
             else:
                 res_val = self.unmodelledCompare(node, cmp, v0, v1)
 
-            abstract_state[res] = res_val
+            abstract_state[res] = AbstractValue(res_val)
         else:
             # Mixed operand type compare, marked
             abstract_state[res] = AbstractValue(
@@ -3537,7 +3536,7 @@ class AbstractExecution:
         for check, args in pending.values():
             check(*args)
 
-    def checkBufferOverflow(self, node: pysvf.ICFGNode, ptr_id: int, access_width=1):
+    def checkBufferOverflow(self, node: pysvf.ICFGNode, ptr_id: int, access_width: int | IntervalValue = 1):
         """Check that the bytes [offset, offset + access_width) lie inside every
         object ptr_id may point to. access_width is an int or an IntervalValue."""
         if node not in self.post_abs_trace:
@@ -4042,8 +4041,10 @@ class AbstractExecution:
                 variable_id = previous.getIDFromAddr(identifier) if memory else identifier
                 if variable_id not in self._threshold_integer_ids:
                     variable = self.svfir.getGNode(variable_id)
-                    self._threshold_integer_ids[variable_id] = (
-                        variable is not None and variable.getType().isIntegerType())
+                    var_type = (variable.getType()
+                                if isinstance(variable, (pysvf.ValVar, pysvf.BaseObjVar, pysvf.GepObjVar))
+                                else None)
+                    self._threshold_integer_ids[variable_id] = var_type is not None and var_type.isIntegerType()
                 if not self._threshold_integer_ids[variable_id]:
                     continue
                 interval = self.thresholdInterval(old_value.getInterval(), new_value.getInterval(), value.getInterval(), thresholds)
