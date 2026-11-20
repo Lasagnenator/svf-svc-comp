@@ -1030,11 +1030,6 @@ def main(argv=None):
                     f"score={sum(item.score for item in results):+d} "
                     f"{result.wall_seconds:.2f}s {memory} {task.yaml_relative}::{task.property_name}"
                 )
-                if result.classification in {"tool_error", "timeout", "unsupported"}:
-                    print(f"  log: {result.log_path}", file=sys.stderr)
-                    print(f"  rerun: {result.rerun_command}", file=sys.stderr)
-                    if result.error_message:
-                        print("  " + result.error_message.replace("\n", "\n  "), file=sys.stderr)
     except KeyboardInterrupt:
         interrupted = True
         print("Interrupted; writing partial summary.", file=sys.stderr)
