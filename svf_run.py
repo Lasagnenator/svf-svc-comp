@@ -250,7 +250,7 @@ def setup_working_file(input_file_path: str, bits: str):
         gaps = (ae.results.get("incomplete", []) + ae.results.get("memory_gaps", [])
                 + ae.results.get("global_memory_gaps", []))
         log(f"Memory analysis inconclusive ({len(gaps)} gap(s)); reporting Unknown.")
-        for reason in sorted(set(gaps))[:25]:
+        for reason in sorted(set(gaps)):
             log(f"  gap: {reason}", category=Log.MEMORY)
         verdict = "Unknown"
         correctness = "Unknown"
