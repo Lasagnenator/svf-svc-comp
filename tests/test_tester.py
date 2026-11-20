@@ -603,6 +603,39 @@ class TesterUnitTests(unittest.TestCase):
         summary = tester.summarize(results, 2, [first, second], 0)
         self.assertEqual(summary["normalized_score"], 3)
 
+    def test_verdict_metrics_pool_counts_and_exclude_unfinished_runs(self):
+        arrays = "C.unreach-call.Arrays"
+        loops = "C.unreach-call.Loops"
+        heap = "C.valid-memsafety.Heap"
+        juliet = "C.valid-memsafety.Juliet"
+        cases = [
+            (arrays, "true", "result"),
+            (arrays, "false", "result"),
+            (arrays, "unknown", "timeout"),
+            (loops, "true", "result"),
+            (heap, "unknown", "unsupported"),
+            (heap, "unknown", "unknown"),
+            (juliet, None, None),  # Selected, but not completed.
+        ]
+        selected = [self.categorised(self.make_task(str(i)), category)
+                    for i, (category, _, _) in enumerate(cases)]
+        results = [SimpleNamespace(category=category, answer=answer, expected=True,
+                                   classification=classification, score=0)
+                   for category, answer, classification in cases if answer is not None]
+        metrics = tester.summarize(results, len(selected), selected, 0,
+                                   interrupted=True)["verdict_metrics"]
+        self.assertEqual(metrics["overall"], {
+            "completed": 6, "verdicts": 3, "correct": 2,
+            "coverage_percent": 50.0, "accuracy_percent": 200 / 3,
+        })
+        self.assertEqual(metrics["by_meta_category"]["reachsafety"]["coverage_percent"], 75.0)
+        self.assertEqual(metrics["by_meta_category"]["reachsafety"]["accuracy_percent"], 200 / 3)
+        self.assertEqual(metrics["by_category"][arrays]["accuracy_percent"], 50.0)
+        self.assertEqual(metrics["by_meta_category"]["memsafety"]["coverage_percent"], 0.0)
+        self.assertIsNone(metrics["by_category"][heap]["accuracy_percent"])
+        self.assertIsNone(metrics["by_category"][juliet]["coverage_percent"])
+        self.assertIsNone(metrics["by_category"][juliet]["accuracy_percent"])
+
     @mock.patch("tests.tester.subprocess.Popen")
     def test_validator_checks_optional_witnesses_and_preserves_spaces(self, run):
         run.return_value.returncode = 0
@@ -660,7 +693,7 @@ class TesterUnitTests(unittest.TestCase):
     def test_summary_reports_fraction_of_generated_witnesses(self):
         task = self.make_task("safe")
         results = [SimpleNamespace(
-            category=None, score=2, answer="true", expected=True, classification="result",
+            category=None, property="reach", score=2, answer="true", expected=True, classification="result",
             witness_path=path, witness_validation=status)
             for path, status in (("one.yml", "correct"), ("two.yml", "unconfirmed"),
                                  (None, "not-required"))]
@@ -744,6 +777,15 @@ print(answers[name])
         self.assertEqual(summary["score"], -45)
         self.assertEqual(summary["maximum_selected_score"], 8)
         self.assertEqual(summary["counts"], {"correct": 2, "wrong": 2, "tool_error": 1})
+        metrics = summary["verdict_metrics"]
+        self.assertEqual(metrics["overall"], {
+            "completed": 5, "verdicts": 4, "correct": 2,
+            "coverage_percent": 80.0, "accuracy_percent": 50.0,
+        })
+        self.assertEqual(metrics["by_category"], {"reach": metrics["overall"]})
+        self.assertEqual(metrics["by_meta_category"], {})
+        self.assertIn("Overall: coverage 80.0% (4/5), accuracy 50.0% (2/4)", process.stdout)
+        self.assertIn("reach: coverage 80.0% (4/5), accuracy 50.0% (2/4)", process.stdout)
         self.assertEqual(len(records), 5)
         for record in records:
             self.assertGreater(record["peak_memory_mib"], 0)

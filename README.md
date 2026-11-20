@@ -121,8 +121,17 @@ Results are written under `test-results/<timestamp>/`:
 - `results.jsonl` is flushed after every run and includes verdict, score, witness status,
   termination reason, diagnostic tail, log path, and the direct tool invocation.
 - `logs/` retains complete stdout, stderr, generated witnesses, and `.validation.log` validator logs.
-- `summary.json` reports the score, normalized leaf-category scores, result counts, and witness confirmation fraction;
+- `summary.json` reports the score, normalized leaf-category scores, result counts, verdict metrics,
+  and witness confirmation fraction;
   `--output FILE.csv` adds CSV.
+
+The console summary and `summary.json` report **verdict coverage** (true or false verdicts divided
+by completed runs) and **verdict accuracy** (correct verdicts divided by true or false verdicts).
+Both are reported overall, by meta-category, and by leaf category (or by property for runs selected
+with flags such as `--reach`). Unknowns, errors, timeouts, and unsupported runs count toward the
+coverage denominator but not the accuracy denominator. Unfinished runs count toward neither.
+Percentages with a zero denominator are shown as `N/A` (`null` in JSON). Accuracy compares verdicts
+with benchmark metadata, regardless of witness validation.
 
 ### Scoring and witness validation
 

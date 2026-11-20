@@ -12,6 +12,7 @@ Example usage from the svf-svc repository root:
 """
 
 import argparse
+from collections import Counter
 import csv
 from dataclasses import asdict, dataclass
 import datetime
@@ -727,8 +728,46 @@ def run_task(task, args, logs_dir):
     )
 
 
+def verdict_metrics(counts):
+    completed = sum(counts.values())
+    correct = counts.get("correct", 0)
+    verdicts = correct + counts.get("wrong", 0)
+    return {
+        "completed": completed,
+        "verdicts": verdicts,
+        "correct": correct,
+        "coverage_percent": 100 * verdicts / completed if completed else None,
+        "accuracy_percent": 100 * correct / verdicts if verdicts else None,
+    }
+
+
+def print_verdict_metrics(summary):
+    def percent(value):
+        return "N/A" if value is None else f"{value:.1f}%"
+
+    def print_row(name, metrics):
+        print(f"  {name}: coverage {percent(metrics['coverage_percent'])} "
+              f"({metrics['verdicts']}/{metrics['completed']}), "
+              f"accuracy {percent(metrics['accuracy_percent'])} "
+              f"({metrics['correct']}/{metrics['verdicts']})")
+
+    metrics = summary["verdict_metrics"]
+    print("Verdict coverage and accuracy:")
+    print_row("Overall", metrics["overall"])
+    for level, heading in (("by_meta_category", "Meta-categories"),
+                           ("by_category", "Leaf categories / properties")):
+        if metrics[level]:
+            print(f"{heading}:")
+            for name, row in sorted(metrics[level].items()):
+                print_row(name, row)
+
+
 def summarize(results, population, selected, elapsed, interrupted=False):
-    counts = {}
+    counts = Counter()
+    meta_by_leaf = {spec.name: meta for meta, specs in SVCOMP27_CATEGORIES.items()
+                    for spec in specs}
+    category_counts = {task.category or task.property_name: Counter() for task in selected}
+    meta_counts = {meta_by_leaf[name]: Counter() for name in category_counts if name in meta_by_leaf}
     correct_answers = {
         f"{status}_{answer}": 0
         for answer in ("true", "false")
@@ -737,7 +776,11 @@ def summarize(results, population, selected, elapsed, interrupted=False):
     for result in results:
         key = result.classification if result.answer == "unknown" else (
             "correct" if result.answer == str(result.expected).lower() else "wrong")
-        counts[key] = counts.get(key, 0) + 1
+        counts[key] += 1
+        category = result.category or result.property
+        category_counts[category][key] += 1
+        if category in meta_by_leaf:
+            meta_counts[meta_by_leaf[category]][key] += 1
         if key == "correct":
             validation = getattr(result, "witness_validation", "unconfirmed")
             status = {"correct": "confirmed", "not-required": "not_required"}.get(
@@ -772,6 +815,11 @@ def summarize(results, population, selected, elapsed, interrupted=False):
         "category_scores": category_scores,
         "maximum_selected_score": maximum,
         "counts": counts,
+        "verdict_metrics": {
+            "overall": verdict_metrics(counts),
+            "by_meta_category": {name: verdict_metrics(group) for name, group in meta_counts.items()},
+            "by_category": {name: verdict_metrics(group) for name, group in category_counts.items()},
+        },
         "correct_answers": correct_answers,
         "witness_validation": {
             "generated": len(witnesses),
@@ -1001,6 +1049,7 @@ def main(argv=None):
     if summary["normalized_score"] is not None:
         print(f"Normalized meta-category score: {summary['normalized_score']:+.6g}")
     print("Counts: " + ", ".join(f"{key}={value}" for key, value in sorted(summary["counts"].items())))
+    print_verdict_metrics(summary)
     print("Correct answers: " + ", ".join(
         f"{key}={value}" for key, value in summary["correct_answers"].items()))
     validation = summary["witness_validation"]
