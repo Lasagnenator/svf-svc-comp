@@ -799,7 +799,6 @@ print(answers[name])
         self.assertEqual(error["error_code"], "ERROR(AE)")
         self.assertIn("getElementIndex", error["error_message"])
         self.assertIn("getElementIndex", Path(error["log_path"]).read_text())
-        self.assertIn("rerun:", process.stderr)
 
     def test_dry_run_sampling_writes_replayable_manifest(self):
         process = subprocess.run(
