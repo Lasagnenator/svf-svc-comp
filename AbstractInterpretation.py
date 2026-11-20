@@ -281,7 +281,7 @@ class AbstractExecutionHelper:
     managing GEP object offsets, and other utilities.
     """
 
-    def __init__(self, svfir: pysvf.SVFIR, ae_manager):
+    def __init__(self, svfir: pysvf.SVFIR, ae_manager: pysvf.AbstractInterpretation):
         """
         Initialize member variables.
         """
