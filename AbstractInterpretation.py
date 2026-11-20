@@ -3571,10 +3571,8 @@ class AbstractExecution:
         zero = pysvf.BoundedInt(0)
 
         for addr in addrs:
-            obj_id = abstract_state.getIDFromAddr(addr)
-
             try:
-                base_obj = self.svfir.getBaseObject(obj_id)
+                base_obj = self.getBaseObjectFromAddress(abstract_state, addr)
                 if not base_obj:
                     must_overflow = False
                     continue
