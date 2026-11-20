@@ -221,7 +221,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}", category=Log.REACH)
         log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}", category=Log.REACH)
         log(f"Coverage gaps recorded: {len(gaps)}", category=Log.REACH)
-        for reason in sorted(set(gaps))[:25]:
+        for reason in sorted(set(gaps)):
             log(f"  gap: {reason}", category=Log.REACH)
 
         if feasible_ids:
