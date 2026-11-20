@@ -10,6 +10,10 @@ on:
       sample_count:
         description: Number of property runs
         default: "100"
+      validate_witnesses:
+        description: Validate witnesses with CPAchecker
+        type: boolean
+        default: true
 
 env:
   BENCH_REVISION: svcomp27-freeze
@@ -44,6 +48,8 @@ jobs:
     runs-on: ubuntu-26.04
     needs: unit-tests
     timeout-minutes: 60
+    env:
+      VALIDATE_WITNESSES: ${{ github.event_name != 'workflow_dispatch' || inputs.validate_witnesses }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +59,7 @@ jobs:
           cache: pip
 
       - uses: actions/setup-java@v4
+        if: env.VALIDATE_WITNESSES == 'true'
         with:
           distribution: temurin
           java-version: "21"
@@ -107,6 +114,7 @@ jobs:
             --dest "$BENCH_DIR"
 
       - name: Cache CPAchecker
+        if: env.VALIDATE_WITNESSES == 'true'
         id: cpa-cache
         uses: actions/cache@v4
         with:
@@ -114,16 +122,22 @@ jobs:
           key: cpachecker-4.2
 
       - name: Install CPAchecker
-        if: steps.cpa-cache.outputs.cache-hit != 'true'
+        if: env.VALIDATE_WITNESSES == 'true' && steps.cpa-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL -o "$RUNNER_TEMP/cpa.zip" https://cpachecker.sosy-lab.org/CPAchecker-4.2-unix.zip
           unzip -q "$RUNNER_TEMP/cpa.zip" -d "$RUNNER_TEMP"
 
       - name: Point tester at CPAchecker
+        if: env.VALIDATE_WITNESSES == 'true'
         run: echo "CPACHECKER_HOME=$RUNNER_TEMP/CPAchecker-4.2-unix" >> "$GITHUB_ENV"
 
       - name: Run benchmark sample
         run: |
+          if [[ "$VALIDATE_WITNESSES" == 'true' ]]; then
+            validation_args=(--validation-wall-limit 60)
+          else
+            validation_args=(--no-validate)
+          fi
           python tests/tester.py "$BENCH_DIR" "$PWD" \
             --category reachsafety \
             --category memsafety \
@@ -131,7 +145,7 @@ jobs:
             --seed "$SEED" \
             --cpu-limit 15 \
             --wall-limit 25 \
-            --validation-wall-limit 60 \
+            "${validation_args[@]}" \
             --results-dir "$RUNNER_TEMP/results"
 
       - name: Upload results
