@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
-    parser.add_argument("--claim-violations", action="store_true",
+    parser.add_argument("--claim-reach-violations", action="store_true",
                         help="report a violation whenever the abstract state says reach_error "
                              "is feasible. Off by default: abstract feasibility is not proof of "
                              "a concrete path, and the witness carries no trace to confirm it.")
@@ -36,11 +36,10 @@ def main():
     log(f"Arguments: {args}", category=Log.SETUP)
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
-    runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_violations)
+    runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_reach_violations)
 
-# Accepts a C source file, and traverses its ICFG using the SVF framework
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witness_format="2.0", claim_violations=False):
-
+def setup_working_file(input_file_path: str, bits: str):
+    """Add nondet implementations and compile to LLVM."""
     # Preprocesses the C source file by replacing the nondet function calls
     buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
     with open(input_file_path, "r") as f:
@@ -225,7 +224,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
             log(f"  gap: {reason}", category=Log.REACH)
 
         if feasible_ids:
-            if claim_violations:
+            if claim_reach_violations:
                 verdict = "REACH Incorrect"
                 correctness = "Incorrect"
             else:
