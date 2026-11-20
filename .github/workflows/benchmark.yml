@@ -2,9 +2,9 @@ name: SV-COMP benchmark sample
 
 on:
   pull_request:
-    branches: [master]
+    branches: ['**']
   push:
-    branches: [master]
+    branches: ['**']
   workflow_dispatch:
     inputs:
       sample_count:
