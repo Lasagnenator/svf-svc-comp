@@ -15,7 +15,6 @@ from AbstractInterpretation import *
 from cfl_reachability import CFLreachability
 
 def main():
-    # this implementation just accepts the file to do testing on
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
@@ -80,7 +79,13 @@ def setup_working_file(input_file_path: str, bits: str):
         log(f"Clang failed to output {working_file.name}. SVF will fail.")
         working_file.close()
         fail("ERROR(CLANG)", retcode)
+    return working_file, input_line_count
 
+
+def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_format, claim_reach_violations):
+
+    # TODO: remove the input_line_count return value. It feels wrong to have it here.
+    working_file, input_line_count = setup_working_file(input_file_path, bits)
 
     try:
         svf_args = [working_file.name]
@@ -96,7 +101,7 @@ def setup_working_file(input_file_path: str, bits: str):
     # parse input prop file path to find the file name
     prop_file_name = prop_file_path.split('/')[-1]
 
-    # ae first
+    # Run AE
     try:
         ae = AbstractExecution(pag)
         ae.threshold_widening = prop_file_name == 'unreach-call.prp'
