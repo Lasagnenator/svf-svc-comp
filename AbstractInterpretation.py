@@ -410,8 +410,8 @@ class AbstractExecutionHelper:
         if abstractState.inVarToAddrsTable(dstId) and abstractState.inVarToAddrsTable(srcId):
             self.ae_manager.updateAbsState(node, abstractState)
             for index in range(0, int(range_val)):
-                expr_src = self.ae_manager.getGepObjAddrs(src, pysvf.IntervalValue(index))
-                expr_dst = self.ae_manager.getGepObjAddrs(dst, pysvf.IntervalValue(index + start_idx))
+                expr_src = self.ae_manager.getGepObjAddrs(node, src, pysvf.IntervalValue(index))
+                expr_dst = self.ae_manager.getGepObjAddrs(node, dst, pysvf.IntervalValue(index + start_idx))
                 for addr_src in expr_src:
                     for addr_dst in expr_dst:
                         objId = abstractState.getIDFromAddr(addr_src)
@@ -451,7 +451,7 @@ class AbstractExecutionHelper:
         if abstractState.getVar(value_id).isAddr():
             self.ae_manager.updateAbsState(node, abstractState)
             for index in range(dst_size):
-                expr0 = self.ae_manager.getGepObjAddrs(strValue, pysvf.IntervalValue(index))
+                expr0 = self.ae_manager.getGepObjAddrs(node, strValue, pysvf.IntervalValue(index))
                 val = pysvf.AbstractValue()
 
                 for addr in expr0:
@@ -3075,6 +3075,7 @@ class AbstractExecution:
 
         # Create SVF's symbolic address for the derived pointer.
         gep_addresses = self.ae_manager.getGepObjAddrs(
+            node,
             gep.getRHSVar(),
             self.ae_manager.getGepElementIndex(gep)
         )
