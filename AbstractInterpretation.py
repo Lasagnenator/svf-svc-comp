@@ -619,6 +619,8 @@ class AbstractExecution:
         self.results["badfree"] = []
         self.results["invaliddereference"] = []
 
+        self.threshold_widening = False
+
     """
     Initialize the WTO (Weak topological order) for each function.
     """
@@ -3982,7 +3984,7 @@ class AbstractExecution:
     :type cycle: ICFGWTOCycle
     """
     def loopThresholds(self, function):
-        if not getattr(self, 'threshold_widening', False):
+        if not self.threshold_widening:
             return ()
         if not hasattr(self, '_loop_thresholds'):
             constants = {}
