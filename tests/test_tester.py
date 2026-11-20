@@ -328,7 +328,7 @@ class WitnessExportTests(unittest.TestCase):
             witness = Path(directory) / 'witness.yml'
             source.write_text(program)
             process = subprocess.run(
-                [sys.executable, str(ROOT / 'svf_run.py'), '--claim-violations',
+                [sys.executable, str(ROOT / 'svf_run.py'), '--claim-reach-violations',
                  '--prop', str(ROOT / 'tests' / 'unreach-call.prp'),
                  '--witness', str(witness), str(source)],
                 capture_output=True, text=True, timeout=300)
