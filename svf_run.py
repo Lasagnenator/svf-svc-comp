@@ -263,7 +263,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits="64", witnes
         memory = violations.memory_violation(ae.results)
         gaps = list(ae.results.get("incomplete", []))
         log(f"Coverage gaps recorded: {len(gaps)}")
-        for reason in sorted(set(gaps))[:25]:
+        for reason in sorted(set(gaps)):
             log(f"  gap: {reason}")
         if memory:
             kind, subproperty = memory
