@@ -33,7 +33,7 @@ class PointerInit(Enum):
 class UnknownException(Exception):
     def __init__(self, msg: str):
         super().__init__(msg)
-        self.msg = msg 
+        self.msg = msg
 
     def __str__(self) -> str:
         return self.msg
@@ -309,7 +309,7 @@ class AbstractExecutionHelper:
             "Memory Leak": [],
             "Bad Free": []
         }
-    
+
     def _register_bug(self, category: str, node, msg: str):
         """Internal helper to ensure all bugs are recorded consistently."""
         self.node_to_bug_info[node] = msg
@@ -337,7 +337,7 @@ class AbstractExecutionHelper:
         self._register_bug("Bad Free", node, msg)
 
     def printReport(self):
-        
+
         total_bugs = len(self.node_to_bug_info)
         if total_bugs == 0:
             log("No memory safety violations detected. Program is safe!", category=Log.MEMORY)
@@ -345,7 +345,7 @@ class AbstractExecutionHelper:
             return
 
         log(f"Total Memory Safety Violations Found: {total_bugs}\n", category=Log.MEMORY)
-        
+
         for category, reports in self.bug_reports.items():
             if len(reports) > 0:
                 log(f"###################### {category} ({len(reports)} found) ######################", category=Log.MEMORY)
@@ -550,7 +550,7 @@ class AbstractExecution:
         self.scope_exit_objects = {}
 
         # Used for tracking offsets for pointers
-        # This is because the current SVF architecture collapsed the array 
+        # This is because the current SVF architecture collapsed the array
         # So arry[10]; p = &array[2] and q = &p[3] will cause p, q and array to be the same Object ID
         # Cannot make p an ObjectID array + offset because it may cause address collision
         self.pre_ptr_offset_trace = {}   # node -> {var_id: IntervalValue}
@@ -634,17 +634,17 @@ class AbstractExecution:
             wto = ICFGWTO(self.icfg, self.icfg.getFunEntryICFGNode(fun))
             wto.init()
             self.func_to_wto[fun] = wto
-            
+
         # Build mapping from cycle head nodes to their corresponding cycles
         self.cycle_head_to_cycle = {}
-        
+
         #Recursively extract ALL cycles, including nested inner loops
         def extract_cycles(components):
             for comp in components:
                 if isinstance(comp, ICFGWTOCycle):
                     self.cycle_head_to_cycle[comp.head.node] = comp
                     extract_cycles(comp.components)
-                    
+
         for fun, wto in self.func_to_wto.items():
             extract_cycles(wto.components)
 
@@ -705,11 +705,11 @@ class AbstractExecution:
     def getSourceLine(node):
         if node is None:
             return None
-        
+
         loc_str = str(node.getSourceLoc())
         if not loc_str:
             return None
-            
+
         try:
             #sample input: { "ln": 21, "cl": 6, "fl": "/tmp/tmpbvra0hxa.c" }
             value_str = loc_str.split(':')[1].split(',')[0].strip()
@@ -771,7 +771,7 @@ class AbstractExecution:
                     self.scope_exit_objects.setdefault(
                         (source, destination), set()
                     ).update(loop_objects)
-    
+
     def joinPtrOffsetMaps(self, dst: Dict[int, pysvf.AbstractValue], src: Dict[int, pysvf.AbstractValue]):
         """ Safely join dictionary-based offset traces """
         for var_id, src_val in src.items():
@@ -886,7 +886,7 @@ class AbstractExecution:
 
     """
     Handle a function in the ICFG using WTO components and worklist algorithm.
-    
+
     This function processes a function by:
     1. Building a set of WTO components for the function
     2. Using a worklist algorithm to process nodes in topological order
@@ -897,7 +897,7 @@ class AbstractExecution:
         fun = funEntry.getFun()
         if fun is not None:
             self.visited.add(fun.getName())
-            
+
         wto = self.func_to_wto.get(fun)
         if wto:
             # Structurally delegate all traversal to the WTO components
@@ -905,10 +905,10 @@ class AbstractExecution:
 
     """
     Get the next nodes of a given ICFG node.
-    
+
     This function returns the successor nodes of a given ICFG node by examining
     its outgoing edges. It handles both intra-procedural edges and call-return edges.
-    
+
     :param node: The ICFG node whose successors are to be found
     :type node: pysvf.ICFGNode
     :return: List of successor nodes
@@ -920,24 +920,24 @@ class AbstractExecution:
             dst = edge.getDstNode()
             if dst.getFun() == node.getFun():
                 out_edges.append(dst)
-        
+
         # Handle call-return edges
         if isinstance(node, pysvf.CallICFGNode):
             ret_node = node.getRetICFGNode()
             out_edges.append(ret_node)
-        
+
         return out_edges
 
     """
     Get the next nodes of a cycle.
-    
+
     This function returns the next nodes of a cycle by iterating through the cycle's components.
     The next nodes of a cycle are the next nodes of the cycle nodes (including cycle head and cycle components)
     that are located outside the cycle.
-    
+
     Inner cycles are skipped because their next nodes cannot be outside the outer cycle.
     Only the next nodes of cycle nodes that point to nodes outside the cycle are included in cycleNext.
-    
+
     :param cycle: The WTO cycle whose next nodes are to be found
     :type cycle: ICFGWTOCycle
     :return: List of next nodes that are outside the cycle
@@ -945,7 +945,7 @@ class AbstractExecution:
     """
     def getNextNodesOfCycle(self, cycle: ICFGWTOCycle) -> List[pysvf.ICFGNode]:
         cycle_nodes = set()
-        
+
         # Recursively collect every single node inside the entire cycle structure
         def collect_nodes(c: ICFGWTOCycle):
             cycle_nodes.add(c.head.node)
@@ -954,18 +954,18 @@ class AbstractExecution:
                     cycle_nodes.add(comp.node)
                 elif isinstance(comp, ICFGWTOCycle):
                     collect_nodes(comp)
-                    
+
         collect_nodes(cycle)
-        
+
         out_edges = []
-        
+
         # Any edge coming from a node inside the cycle pointing to a node
         # OUTSIDE the cycle is a valid exit path.
         for node in cycle_nodes:
             for next_node in self.getNextNodes(node):
                 if next_node not in cycle_nodes:
                     out_edges.append(next_node)
-                    
+
         return out_edges
 
 
@@ -976,7 +976,7 @@ class AbstractExecution:
     It also checks if the abstract state has reached a fixpoint and returns the result.
     Return true means the abstract state has changed
     Return false means the abstract state has reached a fixpoint or is infeasible
-    
+
     """
     def handleICFGNode(self, node: pysvf.ICFGNode):
         is_feasible, self.pre_abs_trace[node] = self.mergeStatesFromPredecessors(node)
@@ -1032,7 +1032,7 @@ class AbstractExecution:
         # callee before its exit state flows back to the caller.
         if isinstance(node, pysvf.FunExitICFGNode):
             self.expireStackObjectsAtFunctionExit(node)
-            
+
         # Save the completed post-state into the C++ manager.
         self.ae_manager.updateAbsState(
             node,
@@ -1066,7 +1066,7 @@ class AbstractExecution:
         return True
     """
     Handle a call site in the control flow graph
-    
+
     This function processes a call site by updating the abstract state, handling the called function,
     and managing the call stack. It resumes the execution state after the function call.
     return void
@@ -1577,7 +1577,7 @@ class AbstractExecution:
 
         # Handle Direct Calls
         fun_name = callee.getName()
-        
+
         # Narrow the caller before the body is walked; the body is then analysed as usual,
         # because the return node takes its state from the callee's exit.
         if fun_name in self.ASSUME_HELPERS and not self.applyAssumption(node):
@@ -1606,7 +1606,7 @@ class AbstractExecution:
             if node.getRetICFGNode() and node.getRetICFGNode().getActualRet():
                 lhs_id = node.getRetICFGNode().getActualRet().getId()
                 self.skipped_states[node.getRetICFGNode()][lhs_id] = self.post_abs_trace[node][lhs_id].clone()
-        elif fun_name in ["mem_insert", "str_insert", "malloc", "free", "calloc", "realloc", "alloca", "__builtin_alloca"]: 
+        elif fun_name in ["mem_insert", "str_insert", "malloc", "free", "calloc", "realloc", "alloca", "__builtin_alloca"]:
             self.updateStateOnExtCall(node)
         elif fun_name in self.LIBC_STRING_EXTERNALS:
             self.handleLibcStringCall(node, fun_name)
@@ -1681,7 +1681,7 @@ class AbstractExecution:
     """
     Handle stub functions such as 'svf_assert' and 'OVERFLOW'.
 
-    This function processes specific stub functions in the program's control flow graph (CFG) 
+    This function processes specific stub functions in the program's control flow graph (CFG)
     to validate assertions or detect buffer overflows. It performs the following tasks:
 
     1. For 'svf_assert':
@@ -1692,7 +1692,7 @@ class AbstractExecution:
     2. For 'OVERFLOW':
        - Adds the call node to the set of assertion points.
        - Checks if the right-hand side (RHS) value is an address.
-       - Iterates through the addresses to calculate the access offset and compare it 
+       - Iterates through the addresses to calculate the access offset and compare it
          with the object size to detect buffer overflows.
        - If a buffer overflow is detected, records the overflow node and prints a success message.
        - If no overflow is detected, raises an error.
@@ -1774,7 +1774,7 @@ class AbstractExecution:
                 )
 
     """
-    Join Allocation 
+    Join Allocation
     """
     def joinAllocCount(self, lhs: AllocationCount,
                    rhs: AllocationCount) -> AllocationCount:
@@ -1828,7 +1828,7 @@ class AbstractExecution:
         merged_alloc_state = {}
         merged_lifetime = {}
         merged_alloc_count = {}
-        merged_ptr_offsets = {} 
+        merged_ptr_offsets = {}
         feasible_pointer_init_states = []
         preserved_caller_pointer_init = {}
 
@@ -1875,7 +1875,7 @@ class AbstractExecution:
 
                         if self.isBranchFeasible(edge, tmp_es):
                             abstract_state.joinWith(tmp_es)
-                            self.joinPtrOffsetMaps(merged_ptr_offsets, tmp_offsets) 
+                            self.joinPtrOffsetMaps(merged_ptr_offsets, tmp_offsets)
                             in_edge_num += 1
                             edge_feasible = True
                             state_for_intersect = tmp_es
@@ -1915,11 +1915,11 @@ class AbstractExecution:
         # We must NOT intersect LocToVal, as that deletes heap states from conditionally executed paths.
         if in_edge_num > 1 and common_vars is not None:
             cleaned_state = pysvf.AbstractState()
-            
+
             # Keep all memory locations (union semantics for memory are correct)
             for obj_id, val in abstract_state.getLocToVal().items():
                 cleaned_state.store(obj_id, val.clone())
-                
+
             # Extract variables required by Phi statements at this merge block
             phi_op_vars = set()
             phi_node = block
@@ -1942,7 +1942,7 @@ class AbstractExecution:
                 if successor.getFun() != block.getFun() or len(list(successor.getInEdges())) != 1:
                     break
                 phi_node = successor
-                
+
             # Filter variables: keep if in common_vars, a phi operand, or a global/constant/heap
             for var_id, val in abstract_state.getVarToVal().items():
                 if var_id in common_vars or var_id in phi_op_vars:
@@ -1951,23 +1951,23 @@ class AbstractExecution:
                     var = self.svfir.getGNode(var_id)
                     if not hasattr(var, 'getFunction') or var.getFunction() is None:
                         cleaned_state[var_id] = val.clone()
-            
+
             abstract_state = cleaned_state
 
         # Strip caller-local variables at FunEntryICFGNode (Test 2 Fix)
         if isinstance(block, pysvf.FunEntryICFGNode) and in_edge_num > 0:
             filtered_state = pysvf.AbstractState()
             callee_fun = block.getFun()
-            
+
             for obj_id, val in abstract_state.getLocToVal().items():
                 filtered_state.store(obj_id, val.clone())
-                    
+
             for var_id, val in abstract_state.getVarToVal().items():
                 var = self.svfir.getGNode(var_id)
                 # Keep if it's a global/constant/heap, OR if it belongs to the callee
                 if not hasattr(var, 'getFunction') or var.getFunction() is None or var.getFunction() == callee_fun:
                     filtered_state[var_id] = val.clone()
-                    
+
             abstract_state = filtered_state
 
         # Preserve caller-local variable states across analyzed calls (RetICFGNode Fix)
@@ -2120,12 +2120,12 @@ class AbstractExecution:
                         abstract_state[addr_id] = pysvf.AbstractValue(pysvf.AddressValue(null_val))
                         self.refineLoadedCell(op0 if addr_id == id0 else op1, cmp, pysvf.AddressValue(null_val), abstract_state)
                     else:
-                        return False 
+                        return False
                 elif predicate == Predicate.ICMP_NE:
                     addrs.discard(0)
                     addrs.discard(pysvf.NullMemAddr)
                     if len(addrs) == 0:
-                        return False 
+                        return False
                     abstract_state[addr_id] = pysvf.AbstractValue(pysvf.AddressValue(addrs))
                     self.refineLoadedCell(op0 if addr_id == id0 else op1, cmp, pysvf.AddressValue(addrs), abstract_state)
             elif v0.isAddr() and v1.isAddr():
@@ -2158,7 +2158,7 @@ class AbstractExecution:
             # skip unless both point to the same single object
             same_object = (v0.isAddr() and v1.isAddr() and len(v0.getAddrs()) == 1
                            and set(v0.getAddrs()) == set(v1.getAddrs()))
-            
+
             if same_object and node in self.post_ptr_offset_trace:
                 ptr_offsets = self.post_ptr_offset_trace[node]
                 off0 = ptr_offsets.get(id0)
@@ -2197,7 +2197,7 @@ class AbstractExecution:
         if r0 is None:
             return True
         if self.intervalIsEmpty(r0) or self.intervalIsEmpty(r1):
-            return False 
+            return False
 
         for var, var_id, refined, original in ((op0, id0, r0, i0), (op1, id1, r1, i1)):
             if refined == original:
@@ -2344,7 +2344,7 @@ class AbstractExecution:
                             raise AssertionError(
                                 f"The stub function callsite (svf_assert or OVERFLOW) has not been checked: {node}"
                             )
-                        
+
         assert overflow_assert_to_be_verified <= len(self.buf_overflow_helper.node_to_bug_info), \
             "The number of stub asserts (ground truth) should <= the number of overflow reported"
 
@@ -2557,7 +2557,7 @@ class AbstractExecution:
                         self.alloc_size_trace[obj_id].join_with(size_iv)
                     else:
                         self.alloc_size_trace[obj_id] = size_iv
-        
+
         ## Tracking pointers offset
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
         ptr_offsets[addr.getLHSVarID()] = AbstractValue(pysvf.IntervalValue(0, 0))
@@ -2651,7 +2651,7 @@ class AbstractExecution:
             ###SVF SV-COMP-ADDITION
             # Was IntervalValue(0) -- "definitely false"; [0,1] is the sound default.
             res_val = IntervalValue(0, 1)
-        
+
         #Check both op0 and op1 instead of just op0
         is_op0_int = abstract_state.getVar(op0.getId()).isInterval()
         is_op1_int = abstract_state.getVar(op1.getId()).isInterval()
@@ -2753,11 +2753,11 @@ class AbstractExecution:
         node = call.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         result = None
         result_offset = None
         init_states = []
-        
+
         for index in range(call.getOpVarNum()):
             call_node = call.getOpCallICFGNode(index)
             if call_node in self.post_abs_trace:
@@ -2768,14 +2768,14 @@ class AbstractExecution:
                         actual_id, PointerInit.INITIALIZED
                     )
                 )
-                
+
                 if result is None:
                     result = val
                 else:
                     if result is not val:
                         result = result.clone()
                         result.join_with(val)
-                    
+
                 if call_node in self.post_ptr_offset_trace:
                     off_val = self.post_ptr_offset_trace[call_node].get(actual_id)
                     if off_val is not None:
@@ -2785,9 +2785,9 @@ class AbstractExecution:
                             if result_offset is not off_val:
                                 result_offset = result_offset.clone()
                                 result_offset.join_with(off_val)
-                            
+
         abstract_state[call.getResId()] = result if result is not None else pysvf.AbstractValue(pysvf.IntervalValue.top())
-        
+
         if result_offset is not None:
             ptr_offsets[call.getResId()] = result_offset
         if init_states:
@@ -2801,20 +2801,20 @@ class AbstractExecution:
         node = ret.getICFGNode()
         if node in self.skipped_states:
             return
-            
+
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         rhs_id = ret.getRHSVarID()
         lhs_id = ret.getLHSVarID()
-        
+
         # Propagate Return Value. An unanalysed callee (e.g. a nondet stub) has no return value.
         if abstract_state.inVarToValTable(rhs_id) or abstract_state.inVarToAddrsTable(rhs_id):
             abstract_state[lhs_id] = abstract_state.getVar(rhs_id).clone()
         self.setPointerInitState(
             node, lhs_id, self.pointerInitState(node, rhs_id)
         )
-        
+
         # Propagate Return Pointer Offsets
         if rhs_id in ptr_offsets:
             ptr_offsets[lhs_id] = ptr_offsets[rhs_id].clone()
@@ -2825,7 +2825,7 @@ class AbstractExecution:
         node = select.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         res = select.getResId()
         tval = select.getTrueValue().getId()
         fval = select.getFalseValue().getId()
@@ -2849,15 +2849,15 @@ class AbstractExecution:
                     node, res, self.pointerInitState(node, tval)
                 )
                 return
-                
+
         # Merge both execution paths
         result = abstract_state.getVar(tval).clone()
         result.join_with(abstract_state.getVar(fval))
         abstract_state[res] = result
-        
+
         t_off = ptr_offsets.get(tval)
         f_off = ptr_offsets.get(fval)
-        
+
         res_off = None
         if t_off is not None:
             res_off = t_off.clone()
@@ -2866,7 +2866,7 @@ class AbstractExecution:
                 res_off = f_off.clone()
             else:
                 res_off.join_with(f_off)
-                
+
         if res_off is not None:
             ptr_offsets[res] = res_off
         self.setPointerInitState(
@@ -2953,8 +2953,8 @@ class AbstractExecution:
         else:
             assert isinstance(obj, pysvf.DummyObjVar), "What other types of object?"
             return pysvf.IntervalValue.top()
-        
-    
+
+
 
     #TODO : Implement the state updates for Copy, Binary, Store, Load, Gep, Phi
     # TODO: your code starts from here
@@ -3036,7 +3036,7 @@ class AbstractExecution:
                 merged_offset = stored_offset.clone()
             else:
                 merged_offset.join_with(stored_offset)
-        
+
         # Store the new offset, [0, 0] if loaded is a valid base pointer
         ptr_offsets[lhs] = (
             merged_offset
@@ -3093,7 +3093,7 @@ class AbstractExecution:
                 # This cache only improves precision; the pointer value and its
                 # conservative offset trace have already been updated safely.
                 pass
-            
+
         self.updatePointerOffsetOnGep(gep, offset)
 
     #TODO: your code starts from here
@@ -3101,7 +3101,7 @@ class AbstractExecution:
         node = store.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         lhs = store.getLHSVarID() # Memory location
         rhs = store.getRHSVarID() # Value being stored
         rhs_init = self.pointerInitState(node, rhs)
@@ -3113,24 +3113,24 @@ class AbstractExecution:
             value = abstract_state[rhs]
             needs_weak = self.needsWeakUpdate(abstract_state, abstract_state[lhs].getAddrs())
             target_addrs = list(abstract_state[lhs].getAddrs())
-            
+
             if needs_weak:
                 value = value.clone()
                 for addr in abstract_state[lhs].getAddrs():
                     if abstract_state.getIDFromAddr(addr) in abstract_state.getLocToVal():
                         value.join_with(abstract_state.load(addr))
-                        
+
             self.ae_manager.updateAbsState(node, abstract_state)
             self.ae_manager.storeValue(store.getLHSVar(), value, node)
             self.post_abs_trace[node] = self.ae_manager.getAbsState(node).clone()
             abstract_state = self.post_abs_trace[node]
-            
+
             # --- Pointer Offset Memory Tracking (Raw + Canonical Object Keys) ---
             rhs_var = abstract_state.getVar(rhs)
             offset_val = ptr_offsets.get(rhs)
             if rhs_var.isAddr() and offset_val is None:
                 offset_val = pysvf.AbstractValue(pysvf.IntervalValue(0, 0))
-            
+
             if rhs_var.isAddr() and offset_val is not None:
                 for addr in abstract_state.getVar(lhs).getAddrs():
                     if addr == 0 or abstract_state.isNullMem(addr):
@@ -3170,7 +3170,7 @@ class AbstractExecution:
                     self.setPointerInitState(node, key, stored_state)
 
     def needsWeakUpdate(self, abstract_state, addrs) -> bool:
-        """ Update when exact location is unknown: adds its value to what the 
+        """ Update when exact location is unknown: adds its value to what the
         state already holds, instead of replacing it
             Example
             int a[10];      // one cell for the whole array
@@ -3439,18 +3439,18 @@ class AbstractExecution:
         node = phi.getICFGNode()
         abstract_state = self.post_abs_trace[node]
         ptr_offsets = self.post_ptr_offset_trace.setdefault(node, {})
-        
+
         lhs = phi.getResId()
         result = None
         result_offset = None
         result_init = None
-        
+
         for i in range(phi.getOpVarNum()):
             op_var = phi.getOpVar(i)
             def_node = op_var.getICFGNode()
             if def_node is not None and def_node in self.infeasible_nodes:
                 continue
-                
+
             op_id = op_var.getId()
             op_val = abstract_state.getVar(op_id)
             op_init = self.pointerInitState(node, op_id)
@@ -3458,7 +3458,7 @@ class AbstractExecution:
                 op_init if result_init is None
                 else self.joinPointerInit(result_init, op_init)
             )
-            
+
             if op_val.isInterval() or op_val.isAddr():
                 if result is None:
                     result = op_val
@@ -3466,7 +3466,7 @@ class AbstractExecution:
                     if result is not op_val:
                         result = result.clone()
                         result.join_with(op_val)
-                    
+
                 if op_id in ptr_offsets:
                     off_val = ptr_offsets[op_id]
                     if result_offset is None:
@@ -3475,7 +3475,7 @@ class AbstractExecution:
                         if result_offset is not off_val:
                             result_offset = result_offset.clone()
                             result_offset.join_with(off_val)
-                        
+
         if result is not None:
             abstract_state[lhs] = result
         if result_offset is not None:
@@ -3649,7 +3649,7 @@ class AbstractExecution:
                     if addr == 0 or abstract_state.isNullMem(addr):
                         continue
                     obj_id = abstract_state.getIDFromAddr(addr)
-                    
+
                     try:
                         obj = self.svfir.getGNode(obj_id)
 
@@ -3972,12 +3972,12 @@ class AbstractExecution:
 
     """
     Handle ICFG nodes in a cycle using widening and narrowing operators.
-    
+
     This function implements abstract interpretation for cycles in the ICFG using widening and narrowing
     operators to ensure termination. It processes all ICFG nodes within a cycle and implements
     widening-narrowing iteration to reach fixed points twice: once for widening (to ensure termination)
     and once for narrowing (to improve precision).
-    
+
     :param cycle: The WTO cycle containing ICFG nodes to be processed
     :type cycle: ICFGWTOCycle
     """
@@ -4061,7 +4061,7 @@ class AbstractExecution:
         narrowing_iters = 0
         MAX_WIDENING = 25
         MAX_NARROWING = 5
-        widen_delay = self.widen_delay 
+        widen_delay = self.widen_delay
         prev_widening_flag = getattr(self, "_in_widening_phase", False)
 
         # Keep _in_widening_phase True for the ENTIRE fixpoint computation (both widening and narrowing)
@@ -4080,7 +4080,7 @@ class AbstractExecution:
                     pre_iteration_ptr_offsets[k] = v.clone()
 
             # 2. Evaluate head node
-            self.handleICFGNode(head) 
+            self.handleICFGNode(head)
 
             if head not in self.post_abs_trace:
                 if head not in self.infeasible_nodes:
@@ -4188,8 +4188,8 @@ class AbstractExecution:
         # including those from callees analysed inside it, without re-running transfers.
         if not self._in_widening_phase:
             self.replayDeferredChecks()
-    
-    
+
+
     def checkMemorySafety(self, node: pysvf.ICFGNode, ptr_id: int):
         if node not in self.post_abs_trace:
             return
@@ -4266,9 +4266,9 @@ class AbstractExecution:
             elif may_be_null:
                 self.recordMemoryGap(f"May null pointer dereference at node {node.getId()}")
 
-            # Lifetime check for both heap and stack objects. 
-            # The dictionary is a three-state domain; 
-            # SVF's native freed set is a coarse may-be-dead signal that travels 
+            # Lifetime check for both heap and stack objects.
+            # The dictionary is a three-state domain;
+            # SVF's native freed set is a coarse may-be-dead signal that travels
             # with AbstractState.
             is_definitely_dead = True
             may_be_dead = False
