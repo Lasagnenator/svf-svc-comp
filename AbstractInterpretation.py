@@ -381,6 +381,22 @@ class AbstractExecutionHelper:
                         raise AssertionError("gepRhsObjVar has no gepObjOffsetFromBase")
 
 
+    @staticmethod
+    def _getBufferObjectId(state: AbstractState, pointer: pysvf.SVFVar) -> Optional[int]:
+        value = state.getVar(pointer.getId())
+        if not value.isAddr() or len(value.getAddrs()) != 1:
+            return None
+        addr = next(iter(value.getAddrs()))
+        if addr == 0 or state.isNullMem(addr) or state.isBlackHoleObjAddr(addr):
+            return None
+        return state.getIDFromAddr(addr)
+
+    @staticmethod
+    def _getBufferElementType(buffer_type: Optional[pysvf.SVFType]) -> Optional[pysvf.SVFType]:
+        if buffer_type is not None and buffer_type.isArrayTy():
+            buffer_type = buffer_type.asArrayType().getTypeOfElement()
+        return buffer_type if buffer_type is not None and buffer_type.isSingleValueTy() else None
+
     def handleMemcpy(self, abstractState: pysvf.AbstractState, dst: pysvf.SVFVar,
                      src: pysvf.SVFVar, len: pysvf.IntervalValue, start_idx: int, node):
         """
@@ -388,24 +404,31 @@ class AbstractExecutionHelper:
         """
         dstId = dst.getId()
         srcId = src.getId()
-        elemSize = 1
-        if isinstance(dst, pysvf.ValVar):
-            dst_type = dst.getType()
-            if dst_type.isArrayTy():
-                elemSize = dst_type.asArrayType().getTypeOfElement().getByteSize()
-            elif dst_type.isPointerTy():
-                elemType = self.ae_manager.getPointeeElement(dst, node)
-                if elemType.isArrayTy():
-                    elemSize = elemType.asArrayType().getTypeOfElement().getByteSize()
-                else:
-                    elemSize = elemType.getByteSize()
-            else:
-                raise AssertionError("Unsupported type")
+        # A GEP index selects a field, not necessarily a byte. Only copy
+        # fields when both buffers have a known, matching element width.
+        widths = []
+        for pointer in (src, dst):
+            if not isinstance(pointer, pysvf.ValVar):
+                return
+            buffer_type = pointer.getType()
+            if buffer_type.isPointerTy():
+                obj_id = self._getBufferObjectId(abstractState, pointer)
+                if obj_id is None:
+                    return
+                buffer_type = self.svfir.getBaseObject(obj_id).getType()
+            elem_type = self._getBufferElementType(buffer_type)
+            if elem_type is None:
+                return
+            widths.append(elem_type.getByteSize())
+        elemSize = widths[0]
+        if not elemSize or elemSize != widths[1] or start_idx % elemSize:
+            return
+        start_idx //= elemSize
         size = len.lb().getNumeral()
-        range_val = size/elemSize
+        range_val = size // elemSize
         if abstractState.inVarToAddrsTable(dstId) and abstractState.inVarToAddrsTable(srcId):
             self.ae_manager.updateAbsState(node, abstractState)
-            for index in range(0, int(range_val)):
+            for index in range(range_val):
                 expr_src = self.ae_manager.getGepObjAddrs(node, src, pysvf.IntervalValue(index))
                 expr_dst = self.ae_manager.getGepObjAddrs(node, dst, pysvf.IntervalValue(index + start_idx))
                 for addr_src in expr_src:
@@ -424,60 +447,35 @@ class AbstractExecutionHelper:
         :param strValue: The SVF variable representing the string.
         :return: An IntervalValue representing the string length.
         """
-        value_id = strValue.getId()
-        dst_size = 0
+        unknown = pysvf.IntervalValue(0, pysvf.Options.max_field_limit())
+        obj_id = self._getBufferObjectId(abstractState, strValue)
+        if obj_id is None:
+            return unknown
 
-        # Determine the size of the destination object
-        for addr in abstractState[value_id].getAddrs():
-            obj_id = abstractState.getIDFromAddr(addr)
-            base_object = self.svfir.getBaseObject(obj_id)
+        base = self.svfir.getBaseObject(obj_id)
+        elem_type = self._getBufferElementType(base.getType())
+        if (elem_type is None or not elem_type.isIntegerType() or elem_type.getByteSize() != 1
+                or not base.isConstantByteSize()):
+            return unknown
 
-            if base_object.isConstantByteSize():
-                dst_size = base_object.getByteSizeOfObj()
-            else:
-                icfg_node = base_object.getICFGNode()
-                for stmt in icfg_node.getSVFStmts():
-                    if isinstance(stmt, pysvf.AddrStmt):
-                        dst_size = self.ae_manager.getAllocaInstByteSize(stmt)
-
-        length = 0
-        elem_size = 1
-
-        # Calculate the string length
-        if abstractState.getVar(value_id).isAddr():
-            self.ae_manager.updateAbsState(node, abstractState)
-            for index in range(dst_size):
-                expr0 = self.ae_manager.getGepObjAddrs(node, strValue, pysvf.IntervalValue(index))
-                val = pysvf.AbstractValue()
-
-                for addr in expr0:
-                    val.join_with(abstractState.load(addr))
-
-                if val.isInterval() and chr(val.getInterval().getIntNumeral()) == '\0':
-                    break
-
-                length += 1
-
-            # Determine the size of each element in the string
-            if strValue.getType().isArrayTy():
-                elem_size = strValue.getType().getTypeOfElement().getByteSize()
-            elif strValue.getType().isPointerTy():
-                elem_type = self.ae_manager.getPointeeElement(strValue, node)
-                if elem_type:
-                    if elem_type.isArrayTy():
-                        elem_size = elem_type.getTypeOfElement().getByteSize()
-                    else:
-                        elem_size = elem_type.getByteSize()
-                else:
-                    elem_size = 1
-            else:
-                raise AssertionError("Unsupported type")
-
-        # Return the calculated string length as an IntervalValue
-        if length == 0:
-            return pysvf.IntervalValue(0, pysvf.Options.max_field_limit())
-        else:
-            return pysvf.IntervalValue(length * elem_size)
+        obj = self.svfir.getGNode(obj_id)
+        start = obj.getConstantFieldIdx() if isinstance(obj, pysvf.GepObjVar) else 0
+        end = min(base.getByteSizeOfObj(), base.getMaxFieldOffsetLimit())
+        self.ae_manager.updateAbsState(node, abstractState)
+        zero = pysvf.BoundedInt(0)
+        for index in range(end - start):
+            addrs = self.ae_manager.getGepObjAddrs(node, strValue, pysvf.IntervalValue(index))
+            if len(addrs) != 1:
+                break
+            val = abstractState.load(next(iter(addrs)))
+            if not val.isInterval():
+                break
+            char = val.getInterval()
+            if char.is_zero():
+                return pysvf.IntervalValue(index)
+            if char.isBottom() or char.lb() <= zero <= char.ub():
+                break
+        return unknown
 
     def addToGepObjOffsetFromBase(self, obj, offset):
         """
