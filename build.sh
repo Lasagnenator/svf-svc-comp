@@ -8,13 +8,16 @@ archive="$dist/svf-svc.zip"
 
 runtime_files=(
     AbstractInterpretation.py
+    analysis_session.py
     cfl_reachability.py
     generate_witness.py
     invariants.py
     nondet.py
+    property_evaluation.py
     svf_run.py
     util.py
     violations.py
+    witness_export.py
     LICENSE.TXT
     README.md
     smoketest.sh
