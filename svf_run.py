@@ -4,9 +4,9 @@ import argparse
 import importlib.metadata
 
 from util import *
-from AbstractInterpretation import *
+from AbstractInterpretation import AnalysisIncomplete, UnknownException
 
-from analysis_session import *
+from analysis_session import analysis_session, ClangError, SVFSetupError, AESetupError
 from property_evaluation import evaluate_property
 from witness_export import export_witness
 
