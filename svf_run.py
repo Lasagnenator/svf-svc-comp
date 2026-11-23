@@ -1,18 +1,14 @@
 #! /usr/bin/env python3
 
-import pysvf
 import argparse
-import subprocess
-import tempfile
-import generate_witness
-import invariants
-import violations
 import importlib.metadata
 
-import nondet
 from util import *
 from AbstractInterpretation import *
-from cfl_reachability import CFLreachability
+
+from analysis_session import *
+from property_evaluation import evaluate_property
+from witness_export import export_witness
 
 def main():
     parser = argparse.ArgumentParser()
@@ -35,309 +31,40 @@ def main():
     log(f"Arguments: {args}", category=Log.SETUP)
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
-    runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_reach_violations)
-
-def setup_working_file(input_file_path: str, bits: str):
-    """Add nondet implementations and compile to LLVM."""
-    # Preprocesses the C source file by replacing the nondet function calls
-    buffer = tempfile.NamedTemporaryFile("w+", suffix=".c")
-    with open(input_file_path, "r") as f:
-        c_code = f.read()
-        nondet_defs = nondet.generate_nondet(c_code)
-
-        buffer.write(c_code)
-        buffer.write(nondet_defs)
-
-    # Anything SVF reports past this line comes from the appended nondet definitions
-    # rather than the input, so invariants there must not reach the witness.
-    input_line_count = len(c_code.splitlines())
-
-    buffer.flush()
-
-    log("Generated file:", category=Log.SETUP)
-    buffer.seek(0)
-    log(buffer.read(), category=Log.SETUP)
-
-    # Compiles the C source file to LLVMIR
-    working_file = tempfile.NamedTemporaryFile("w+", suffix=".ll")
-
-    # SV-COMP tasks predate clang 15; demote these errors and raise the bracket limit.
-    command = ["clang-21", f"-m{bits}", "-S", "-O0", "-fno-discard-value-names", "-g", "-emit-llvm",
-               "-Wno-error=int-conversion",
-               "-Wno-error=implicit-function-declaration",
-               "-Wno-error=incompatible-function-pointer-types",
-               "-fbracket-depth=1024",
-               "-o", working_file.name,]
-    command.append(buffer.name)
-
-    log(f"Running clang with command: {' '.join(command)}", category=Log.SETUP)
-    retcode = subprocess.run(command).returncode
-    buffer.close()
-    log(f"Clang exitted with code {retcode}.", category=Log.SETUP)
-
-    if retcode != 0:
-        log(f"Clang failed to output {working_file.name}. SVF will fail.")
-        working_file.close()
-        fail("ERROR(CLANG)", retcode)
-    return working_file, input_line_count
+    try:
+        runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_reach_violations)
+    except ClangError as exc:
+        log(str(exc))
+        fail("ERROR(CLANG)", exc.returncode)
+    except SVFSetupError as exc:
+        log_exception(exc)
+        fail("ERROR(SVF)")
+    except AESetupError as exc:
+        log_exception(exc)
+        fail("ERROR(AE_SETUP)")
 
 
 def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_format, claim_reach_violations):
 
-    # TODO: remove the input_line_count return value. It feels wrong to have it here.
-    working_file, input_line_count = setup_working_file(input_file_path, bits)
+    prop = get_property(prop_file_path)
 
-    try:
-        svf_args = [working_file.name]
-        pysvf.buildSVFModule(svf_args)
-        pag = pysvf.getPAG()
-    except Exception as e:
-        log(f"pysvf: Failed with {repr(e)}. SVF-SVC will fail.")
-        log_exception(e)
-        working_file.close()
-        fail("ERROR(SVF)")
+    threshold_widening = prop == Property.REACH_SAFETY
+    stop_on_gap = prop in (Property.MEM_SAFETY, Property.MEM_CLEANUP)
 
-
-    # parse input prop file path to find the file name
-    prop_file_name = prop_file_path.split('/')[-1]
-
-    # Run AE
-    try:
-        ae = AbstractExecution(pag)
-        ae.threshold_widening = prop_file_name == 'unreach-call.prp'
-        # Memory verdicts are Unknown on any gap, so stop at a dropped call instead of running on.
-        ae.stop_on_gap = prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp')
-        ae.analyse()
-        log(ae.results, category=Log.TRACE)
-    except AnalysisIncomplete as e:
-        log(f"Memory analysis inconclusive, stopped at: {e}; reporting Unknown.")
-        print("Unknown")
-        working_file.close()
-        pysvf.releasePAG()
-        return
-    except UnknownException:
-        # An operation the analysis does not support, so it cannot give a verdict.
-        print("Unknown")
-        working_file.close()
-        pysvf.releasePAG()
-        return
-    except Exception as e:
-        log(f"AbstractExecution: Failed with {repr(e)}. SVF-SVC will not continue.")
-        log_exception(e)
-        working_file.close()
-        fail("ERROR(AE)")
-
-
-    if prop_file_name == 'unreach-call.prp':
-        feasible_ids = set()
-        for (is_feasible, callNode) in ae.results.get("reach", []):
-            if is_feasible and callNode is not None:
-                feasible_ids.add(callNode.getId())
-
-        # CFL is a log-only cross-check: its 2-frame stack cannot prove safety or veto a finding.
-        log("Running CFL reachability analysis...", category=Log.REACH)
-        cfl = CFLreachability(pag)
-        cfl_results = cfl.analyze()
-        cfl_ids = {n.getId() for ok, n in cfl_results.get("reach", []) if ok and n is not None}
-
-        # Only dropped paths are gaps here. Possible memory errors are for the memory
-        # properties: reach tasks are assumed free of undefined behaviour.
-        gaps = list(ae.results.get("incomplete", []))
-        ignored = (len(ae.results.get("memory_gaps", []))
-                   + len(ae.results.get("global_memory_gaps", [])))
-        if ignored:
-            log(f"Ignored {ignored} memory gap(s) for reachability", category=Log.REACH)
-
-        ###SVF SV-COMP-ADDITION
-        # An empty reach list is ambiguous: a never-visited site is a coverage gap, not a proof.
-        icfg_sites = set()
-        for n in pag.getICFG().getNodes():
-            if isinstance(n, pysvf.CallICFGNode):
-                callee = n.getCalledFunction()
-                if callee and callee.getName() == "reach_error":
-                    icfg_sites.add(n.getId())
-        visited_sites = {node.getId() for (_, node) in ae.results.get("reach", [])
-                         if node is not None}
-        # Only a gap if the holding function was never analysed; otherwise the guard was pruned.
-        analysed = getattr(ae, "visited", set())
-        proven_dead = getattr(ae, "unreachable_nodes", set())
-        calls_by_function = {}
-        indirect_callers = set()
-        entry_roots = {"main", None}
-
-        for call in pag.getICFG().getNodes():
-            if isinstance(call, pysvf.FunEntryICFGNode):
-                function = call.getFun()
-                if function is not None and function.hasAddressTaken():
-                    entry_roots.add(function.getName())
-            if not isinstance(call, pysvf.CallICFGNode):
-                continue
-
-            caller = call.getFun()
-            caller_name = caller.getName() if caller is not None else None
-            if caller_name in analysed and call in proven_dead:
-                continue
-
-            callee = call.getCalledFunction()
-
-            if callee is None:
-                indirect_callers.add(caller_name)
-            else:
-                calls_by_function.setdefault(caller_name, set()).add(
-                    callee.getName()
-                )
-
-        possibly_entered = set(analysed) | entry_roots
-        worklist = list(possibly_entered)
-
-        while worklist:
-            function = worklist.pop()
-
-            for callee in calls_by_function.get(function, ()):
-                if callee not in possibly_entered:
-                    possibly_entered.add(callee)
-                    worklist.append(callee)
-
-        # An unresolved indirect call could target an otherwise unentered function.
-        has_unknown_targets = bool(possibly_entered & indirect_callers)
-        unreached = set()
-        for n in pag.getICFG().getNodes():
-            if not isinstance(n, pysvf.CallICFGNode) or n.getId() not in icfg_sites:
-                continue
-            if n.getId() in visited_sites:
-                continue
-
-            holder = n.getFun().getName() if n.getFun() else None
-
-            if holder is None or holder not in analysed:
-                # Never trust propagated deadness inside a function
-                # that AE never actually analysed.
-                if holder is None or has_unknown_targets or holder in possibly_entered:
-                    unreached.add(n.getId())
-            elif n not in proven_dead:
-                unreached.add(n.getId())
-        log(f"reach_error sites in ICFG     : {sorted(icfg_sites)}", category=Log.REACH)
-        log(f"AE visited reach_error sites  : {sorted(visited_sites)}", category=Log.REACH)
-        if unreached:
-            gaps.append(f"reach_error sites in functions the analysis never entered: "
-                        f"{sorted(unreached)}")
-
-        log(f"AE feasible reach_error nodes : {sorted(feasible_ids)}", category=Log.REACH)
-        log(f"CFL reachable reach_error nodes: {sorted(cfl_ids)}", category=Log.REACH)
-        log(f"Coverage gaps recorded: {len(gaps)}", category=Log.REACH)
-        for reason in sorted(set(gaps)):
-            log(f"  gap: {reason}", category=Log.REACH)
-
-        if feasible_ids:
-            if claim_reach_violations:
-                verdict = "REACH Incorrect"
-                correctness = "Incorrect"
-            else:
-                # Abstract feasibility is not a concrete path, and the witness carries no trace to confirm it.
-                log("reach_error may be reachable, but nothing proves a concrete path "
-                    "gets there; reporting Unknown rather than claiming a violation.")
-                verdict = "Unknown"
-                correctness = "Unknown"
-        elif gaps:
-            # Paths were dropped somewhere, so this is not a proof of safety.
-            log("No feasible reach_error, but the analysis was incomplete; "
-                "reporting Unknown rather than claiming safety.")
-            verdict = "Unknown"
-            correctness = "Unknown"
-        else:
-            verdict = "REACH Correct"
-            correctness = "Correct"
-
-    elif prop_file_name in ('valid-memsafety.prp', 'valid-memcleanup.prp') and (
-            ae.results.get("incomplete") or ae.results.get("memory_gaps")
-            or ae.results.get("global_memory_gaps")):
-        # Dropped paths or unproven memory errors: neither safety nor a violation is shown.
-        gaps = (ae.results.get("incomplete", []) + ae.results.get("memory_gaps", [])
-                + ae.results.get("global_memory_gaps", []))
-        log(f"Memory analysis inconclusive ({len(gaps)} gap(s)); reporting Unknown.")
-        for reason in sorted(set(gaps)):
-            log(f"  gap: {reason}", category=Log.MEMORY)
-        verdict = "Unknown"
-        correctness = "Unknown"
-
-    elif prop_file_name == 'valid-memsafety.prp':
-        # This property file bundles valid-deref, valid-free, and valid-memtrack.
-        # violations.MEMORY_FINDINGS checks our arrays in order and maps each to the
-        # subproperty it violates.
-        memory = violations.memory_violation(ae.results)
-        gaps = list(ae.results.get("incomplete", []))
-        log(f"Coverage gaps recorded: {len(gaps)}")
-        for reason in sorted(set(gaps)):
-            log(f"  gap: {reason}")
-        if memory:
-            kind, subproperty = memory
-            verdict = f"MEMORY Incorrect({subproperty})"
-            correctness = "Incorrect"
-        elif gaps:
-            # Some access could not be verified, so this is not a proof of safety.
-            log("No memory-safety violation found, but the analysis was incomplete; "
-                "reporting Unknown rather than claiming safety.")
-            verdict = "Unknown"
-            correctness = "Unknown"
-        else:
-            verdict = "MEMORY Correct"
-            correctness = "Correct"
-
-    elif prop_file_name == 'valid-memcleanup.prp':
-        # Memcleanup requires all memory to be explicitly freed before exit.
-        # Our memory leak detector at the end of main() handles this perfectly.
-        if len(ae.results.get("memoryleak", [])) > 0:
-            verdict = "CLEANUP Incorrect"
-            correctness = "Incorrect"
-        else:
-            verdict = "CLEANUP Correct"
-            correctness = "Correct"
-
-    else:
-        # Unsupported category.
-        verdict = "Unknown"
-        correctness = "Unknown"
-
-    print(verdict)
-
-    if "Correct" in correctness and "Incorrect" not in correctness:
-        with open(prop_file_path) as f:
-            spec = f.read().strip()
-        loop_invariants = invariants.extract_loop_invariants(
-            ae, pag, input_file_path, input_line_count)
-        log(f"Exported {len(loop_invariants)} loop invariant(s).", category=Log.SETUP)
-        generate_witness.write_witness(
-            loop_invariants, [input_file_path], spec, witness_file_path, witness_format,
-            'ILP32' if bits == "32" else 'LP64')
-    elif correctness == "Incorrect":
-        with open(prop_file_path) as f:
-            spec = f.read().strip()
-        if prop_file_name == 'unreach-call.prp':
-            segments = violations.reach_error_segments(
-                ae.results.get("reach", []), cfl_ids, input_file_path, input_line_count)
-        elif prop_file_name == 'valid-memsafety.prp':
-            # Name only the violated subproperty, not the whole property file.
-            spec = violations.specification_for(spec, subproperty)
-            segments = violations.memory_segments(
-                ae.results[kind], violations.main_exit(pag), input_file_path, input_line_count)
-        else:
-            segments = violations.memory_segments(
-                ae.results.get("memoryleak", []), violations.main_exit(pag),
-                input_file_path, input_line_count)
+    with analysis_session(input_file_path, bits, threshold_widening, stop_on_gap) as session:
         try:
-            if segments is None:
-                raise ValueError("no violation site has a usable source location")
-            generate_witness.write_violation_witness(
-                segments, [input_file_path], spec, witness_file_path, witness_format,
-                'ILP32' if bits == "32" else 'LP64')
-            log(f"Exported a violation witness with {len(segments)} segment(s).")
-        except ValueError as e:
-            log(f"No violation witness: {e}")
-    else:
-        log(f"No witness for result: {correctness}", category=Log.SETUP)
+            session.ae.analyse()
+        except (AnalysisIncomplete, UnknownException) as exc:
+            report_unknown(exc)
+            return
+        except Exception as exc:
+            log_exception(exc)
+            fail("ERROR(AE)")
 
-    working_file.close()
-    pysvf.releasePAG()
+        decision = evaluate_property(prop, session.ae, session.pag, claim_reach_violations)
+        print(decision.verdict)
+        export_witness(decision, prop, session.ae, session.pag, input_file_path, prop_file_path, witness_file_path, session.input_line_count, bits, witness_format)
+    # Do NOT access session objections outside the `with` block.
 
 
 if __name__ == "__main__":
