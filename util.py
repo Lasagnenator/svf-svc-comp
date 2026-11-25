@@ -6,10 +6,6 @@ from typing import NoReturn
 
 VERSION = "3.0-dev"
 
-def get_real_path(relative):
-    # Find the real path given a path relative to the current file
-    return os.path.normpath(os.path.join(os.path.dirname(__file__), relative))
-
 class Log(str, Enum):
     SETUP = "setup"
     SVF = "svf"

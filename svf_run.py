@@ -6,7 +6,7 @@ import importlib.metadata
 from util import *
 from AbstractInterpretation import AnalysisIncomplete, UnknownException
 
-from analysis_session import analysis_session, ClangError, SVFSetupError, AESetupError
+from analysis_session import get_configuration, analysis_session, Configuration, ClangError, SVFSetupError, AESetupError
 from property_evaluation import evaluate_property
 from witness_export import export_witness
 
@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--bits", choices=["32","64"], help="bit width", default="64")
     parser.add_argument("--prop", help="property file", default=None)
+    # Time limit is unused right now. It is still passed in by the competition.
     parser.add_argument("--time-limit", type=int, default=-1, help="SVF time limit")
     parser.add_argument("--claim-reach-violations", action="store_true",
                         help="report a violation whenever the abstract state says reach_error "
@@ -32,7 +33,8 @@ def main():
     log(f"Extra unknown arguments: {extra}", category=Log.SETUP)
 
     try:
-        runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_reach_violations)
+        config = get_configuration(args)
+        run_svf(config)
     except ClangError as exc:
         log_exception(exc)
         fail("ERROR(CLANG)", exc.returncode)
@@ -49,14 +51,12 @@ def main():
         fail("ERROR(UNSPECIFIED)")
 
 
-def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_format, claim_reach_violations):
+def run_svf(config: Configuration):
 
-    prop = get_property(prop_file_path)
+    threshold_widening = config.prop == Property.REACH_SAFETY
+    stop_on_gap = config.prop in (Property.MEM_SAFETY, Property.MEM_CLEANUP)
 
-    threshold_widening = prop == Property.REACH_SAFETY
-    stop_on_gap = prop in (Property.MEM_SAFETY, Property.MEM_CLEANUP)
-
-    with analysis_session(input_file_path, bits, threshold_widening, stop_on_gap) as session:
+    with analysis_session(config, threshold_widening, stop_on_gap) as session:
         try:
             session.ae.analyse()
         except (AnalysisIncomplete, UnknownException) as exc:
@@ -66,9 +66,9 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_for
             log_exception(exc)
             fail("ERROR(AE)")
 
-        decision = evaluate_property(prop, session.ae, session.pag, claim_reach_violations)
+        decision = evaluate_property(config, session)
         print(decision.verdict)
-        export_witness(decision, prop, session.ae, session.pag, input_file_path, prop_file_path, witness_file_path, session.input_line_count, bits, witness_format)
+        export_witness(config, session, decision)
     # Do NOT access session objects outside the `with` block.
 
 

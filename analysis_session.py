@@ -1,5 +1,6 @@
 """Compile an input and manage the native resources for one analysis run."""
 
+from argparse import Namespace
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ import pysvf
 
 import nondet
 from AbstractInterpretation import AbstractExecution
-from util import Log, log
+from util import Log, log, get_property, Property
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,18 @@ class AnalysisSession:
     pag: pysvf.SVFIR
     ae: AbstractExecution
     input_line_count: int
+
+
+@dataclass
+class Configuration:
+    """Overall configuration of the tool"""
+    input_file_path: str
+    prop_file_path: str
+    prop: Property
+    witness_file_path: str
+    witness_format: str
+    bits: str
+    claim_reach_violations: bool
 
 
 class ClangError(RuntimeError):
@@ -35,6 +48,18 @@ class SVFSetupError(RuntimeError):
 
 class AESetupError(RuntimeError):
     """The abstract execution engine could not be initialized."""
+
+
+def get_configuration(args: Namespace) -> Configuration:
+    return Configuration(
+        input_file_path=args.c_file,
+        prop_file_path=args.prop,
+        prop=get_property(args.prop),
+        witness_file_path=args.witness,
+        witness_format=args.witness_format,
+        bits=args.bits,
+        claim_reach_violations=args.claim_reach_violations
+    )
 
 
 def _compile_input(input_path: str | Path, llvm_path: str, bits: str) -> int:
@@ -72,8 +97,7 @@ def _compile_input(input_path: str | Path, llvm_path: str, bits: str) -> int:
 
 @contextmanager
 def analysis_session(
-    input_path: str | Path,
-    bits: str,
+    config: Configuration,
     threshold_widening: bool = False,
     stop_on_gap: bool = False,
 ) -> Generator[AnalysisSession, Any, None]:
@@ -84,7 +108,7 @@ def analysis_session(
     """
     with ExitStack() as stack:
         llvm_file = stack.enter_context(tempfile.NamedTemporaryFile(suffix=".ll"))
-        input_line_count = _compile_input(input_path, llvm_file.name, bits)
+        input_line_count = _compile_input(config.input_file_path, llvm_file.name, config.bits)
 
         try:
             pysvf.buildSVFModule([llvm_file.name])

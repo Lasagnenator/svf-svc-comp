@@ -14,6 +14,7 @@ from violations import memory_violation
 
 if TYPE_CHECKING:
     from AbstractInterpretation import AbstractExecution
+    from analysis_session import Configuration, AnalysisSession
 
 
 class DecisionStatus(Enum):
@@ -175,14 +176,12 @@ def _evaluate_memory(prop: Property, ae: AbstractExecution) -> PropertyDecision:
 
 
 def evaluate_property(
-    prop: Property,
-    ae: AbstractExecution,
-    pag: pysvf.SVFIR,
-    claim_reach_violations: bool = False,
+    config: Configuration,
+    session: AnalysisSession,
 ) -> PropertyDecision:
     """Evaluate a property after AE has completed, while the PAG is still live."""
-    if prop is Property.REACH_SAFETY:
-        return _evaluate_reach(ae, pag, claim_reach_violations)
-    if prop in (Property.MEM_SAFETY, Property.MEM_CLEANUP):
-        return _evaluate_memory(prop, ae)
+    if config.prop is Property.REACH_SAFETY:
+        return _evaluate_reach(session.ae, session.pag, config.claim_reach_violations)
+    if config.prop in (Property.MEM_SAFETY, Property.MEM_CLEANUP):
+        return _evaluate_memory(config.prop, session.ae)
     return _UNKNOWN
