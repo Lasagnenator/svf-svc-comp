@@ -34,7 +34,7 @@ def main():
     try:
         runSVF(args.c_file, args.prop, args.witness, args.bits, args.witness_format, args.claim_reach_violations)
     except ClangError as exc:
-        log(str(exc))
+        log_exception(exc)
         fail("ERROR(CLANG)", exc.returncode)
     except SVFSetupError as exc:
         log_exception(exc)
@@ -42,6 +42,11 @@ def main():
     except AESetupError as exc:
         log_exception(exc)
         fail("ERROR(AE_SETUP)")
+    except Exception as exc:
+        # Something really bad happened.
+        log_exception(exc)
+        log("!!! Uncaught exception. Check traceback. !!!")
+        fail("ERROR(UNSPECIFIED)")
 
 
 def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_format, claim_reach_violations):
@@ -64,7 +69,7 @@ def runSVF(input_file_path, prop_file_path, witness_file_path, bits, witness_for
         decision = evaluate_property(prop, session.ae, session.pag, claim_reach_violations)
         print(decision.verdict)
         export_witness(decision, prop, session.ae, session.pag, input_file_path, prop_file_path, witness_file_path, session.input_line_count, bits, witness_format)
-    # Do NOT access session objections outside the `with` block.
+    # Do NOT access session objects outside the `with` block.
 
 
 if __name__ == "__main__":
